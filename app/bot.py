@@ -23,7 +23,7 @@ from .transcribe import transcribe, TranscribeError
 from .vault import classify, write_note, vault_todoist_config, find_related
 from .llm import LLMError
 from . import todoist as td
-from . import store, rag, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod
+from . import store, rag, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod
 
 log = logging.getLogger(__name__)
 
@@ -632,6 +632,56 @@ async def cmd_news(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _send_news(cfg, update.message)
 
 
+def _pending_move(ctx) -> dict:
+    return ctx.application.bot_data.setdefault("pending_move", {})
+
+
+async def cmd_inbox(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    cfg: Config = ctx.application.bot_data["cfg"]
+    if not _is_allowed(update, cfg):
+        return
+    progress = await update.message.reply_text("📥 Prüfe Inbox...")
+    candidates = await asyncio.to_thread(review_mod.review_candidates, cfg, 5)
+    if not candidates:
+        await progress.edit_text(f"✨ Inbox ({cfg.default_vault}) leer — nichts zu reviewen.")
+        return
+    await progress.edit_text(f"📥 {len(candidates)} Notiz(en) im Misc-Inbox. Review:")
+    for cand in candidates:
+        suggestion = await asyncio.to_thread(review_mod.suggest_vault, cand["text"], cfg)
+        target = suggestion.get("vault", cfg.default_vault)
+        conf = suggestion.get("confidence", 0)
+        reason = suggestion.get("reason", "")
+        token = uuid4().hex[:8]
+        _pending_move(ctx)[token] = {"path": cand["path"], "target": target}
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton(f"→ {target} ({conf:.0%})", callback_data=f"mv:{token}"),
+            InlineKeyboardButton("⏭ Skip", callback_data="cancel"),
+        ]])
+        await update.message.reply_text(
+            f"*{cand['title']}*\n_Vorschlag: {target} — {reason[:50]}_",
+            parse_mode="Markdown", reply_markup=kb,
+        )
+
+
+async def handle_move_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not q or not q.data or not q.data.startswith("mv:"):
+        return
+    cfg: Config = ctx.application.bot_data["cfg"]
+    token = q.data.split(":", 1)[1]
+    pending = _pending_move(ctx).pop(token, None)
+    if not pending:
+        await q.answer("Abgelaufen")
+        return
+    try:
+        await asyncio.to_thread(review_mod.move_note, pending["path"], pending["target"], cfg)
+        await q.answer("Verschoben ✓")
+        await q.edit_message_text(q.message.text + f"\n\n✅ → {pending['target']}", parse_mode="Markdown")
+    except Exception as e:
+        log.exception("move failed")
+        await q.answer(f"Fehler: {e}", show_alert=True)
+
+
 async def cmd_memory(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     cfg: Config = ctx.application.bot_data["cfg"]
     if not _is_allowed(update, cfg):
@@ -823,12 +873,14 @@ def main() -> None:
     app.add_handler(CommandHandler("news", cmd_news))
     app.add_handler(CommandHandler("memory", cmd_memory))
     app.add_handler(CommandHandler("forget", cmd_forget))
+    app.add_handler(CommandHandler("inbox", cmd_inbox))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_done_callback, pattern=r"^done:"))
     app.add_handler(CallbackQueryHandler(handle_event_callback, pattern=r"^ev:"))
     app.add_handler(CallbackQueryHandler(handle_mail_callback, pattern=r"^(mailt:|maile:)"))
     app.add_handler(CallbackQueryHandler(handle_clean_callback, pattern=r"^clean:"))
+    app.add_handler(CallbackQueryHandler(handle_move_callback, pattern=r"^mv:"))
     app.add_handler(CallbackQueryHandler(handle_completion_callback, pattern=r"^(close:|closeall:|cancel$)"))
 
     _reschedule_briefing(app)

@@ -17,6 +17,12 @@ rss_feeds:
   - name: Hacker News (front page)
     url: https://hnrss.org/frontpage
 
+# YouTube channels (optional). Find a channel_id via the channel page source or
+# yt-dlp. Echo title-filters new videos and transcribes only the top 1-2.
+youtube_channels: []
+  # - name: AI Explained
+  #   channel_id: UCNJ1Ymd5yFuUPtn21xtRbbw
+
 # Optional curated deadlines/programs surfaced in the news briefing.
 # Format: name | url | next_deadline (ISO date or "rolling") | note
 accelerators: []

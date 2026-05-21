@@ -121,95 +121,105 @@ TRANSCRIPT: {transcript}
 Return ONLY JSON: {{"summary": "<max 20 words>"}}"""
 
 
-FILTER_PROMPT = """Filter news items for relevance to the user. Keep only genuinely relevant ones.
+SYNTHESIS_PROMPT = """You are writing a personal news briefing for an AI-focused founder. SYNTHESIZE — do not just list items.
 
-USER TOPICS OF INTEREST:
+WINDOW: news from the last {window_days} day(s). Emphasize TODAY and YESTERDAY most.
+
+USER INTERESTS:
 {topics}
 
-WHAT YOU KNOW ABOUT THE USER:
+WHAT YOU KNOW ABOUT THE USER (bias toward these):
 {memory}
 
-NEWS ITEMS (numbered):
+ITEMS (source | age | title | snippet) — articles + video summaries:
 {items}
 
-Return ONLY a JSON object:
-{{
-  "relevant": [
-    {{"n": <item number>, "why": "<3-6 word reason>"}}
-  ]
-}}
+Write a tight, synthesized briefing in German Markdown:
+- GROUP related items into themes/stories. Do NOT echo items 1:1.
+- A story covered by MULTIPLE sources = more important → lead with it, note the corroboration.
+- Prioritize the most recent (today/yesterday) over older.
+- For each story: 1-2 sentences of substance + the single best link as a Markdown link.
+- Skip filler, clickbait, off-topic. Quality over quantity — 3 to 6 strong stories is ideal.
+- End with one line: any cross-cutting trend you noticed.
 
-Keep max 8, ranked by relevance. Drop generic/clickbait/off-topic. Prefer concrete developments over opinion."""
+Return ONLY JSON: {{"briefing": "<markdown briefing>"}}"""
+
+
+def _age_label(iso: str) -> str:
+    if not iso:
+        return "?"
+    try:
+        dt = datetime.fromisoformat(iso)
+        days = (datetime.now(timezone.utc) - dt).days
+        return {0: "heute", 1: "gestern"}.get(days, f"vor {days}d")
+    except Exception:
+        return "?"
 
 
 def build_news_briefing(cfg: Config, max_video_summaries: int = 2) -> str:
+    from . import state as state_mod
     interests = _load_interests()
     topics = interests.get("topics", [])
     feeds = interests.get("rss_feeds", [])
     channels = interests.get("youtube_channels", []) or []
     accelerators = interests.get("accelerators", [])
 
-    items = _fetch_rss(feeds) + _fetch_youtube(channels)
-    lines = ["*📰 News-Briefing*", ""]
-
-    if items:
-        numbered = "\n".join(
-            f"[{i+1}] ({it['type']}/{it['source']}) {it['title']} — {it['summary'][:120]}"
-            for i, it in enumerate(items)
-        )
+    # Recency window = time since last news request (min 1 day, default 3 on first run)
+    st = state_mod.load()
+    last_ts = st.get("last_news_ts")
+    window_days = 3
+    if last_ts:
         try:
-            result = call_json(
-                FILTER_PROMPT.format(
-                    topics="\n".join(f"- {t}" for t in topics),
-                    memory=memory.context() or "(nichts)",
-                    items=numbered,
-                ),
-                primary=cfg.llm_primary, fallback=cfg.llm_fallback,
-            )
-            relevant = result.get("relevant", [])
-        except Exception as e:
-            log.warning("news filter failed: %s", e)
-            relevant = [{"n": i + 1, "why": ""} for i in range(min(6, len(items)))]
+            delta = datetime.now(timezone.utc) - datetime.fromisoformat(last_ts)
+            window_days = max(1, min(14, delta.days + 1))
+        except Exception:
+            pass
 
-        if relevant:
-            # Transcribe + summarize only the top relevant YouTube videos (token-bounded)
-            video_summaries: dict[int, str] = {}
-            vids_done = 0
-            for r in relevant[:8]:
-                idx = r.get("n", 0) - 1
-                if 0 <= idx < len(items) and items[idx]["type"] == "youtube" and vids_done < max_video_summaries:
-                    transcript = _youtube_transcript(items[idx]["link"])
-                    if transcript:
-                        try:
-                            s = call_json(
-                                VIDEO_SUMMARY_PROMPT.format(title=items[idx]["title"], transcript=transcript),
-                                primary=cfg.llm_primary, fallback=cfg.llm_fallback,
-                            )
-                            video_summaries[idx] = s.get("summary", "")
-                            vids_done += 1
-                        except Exception as e:
-                            log.warning("video summary failed: %s", e)
+    items = _fetch_rss(feeds, max_age_days=window_days) + _fetch_youtube(channels, max_age_days=window_days)
+    if not items:
+        return "*📰 News-Briefing*\n\n_Keine aktuellen News im Fenster gefunden._"
 
-            lines.append("*🤖 Für dich relevant:*")
-            for r in relevant[:8]:
-                idx = r.get("n", 0) - 1
-                if 0 <= idx < len(items):
-                    it = items[idx]
-                    icon = "🎥" if it["type"] == "youtube" else "📄"
-                    extra = video_summaries.get(idx) or r.get("why", "")
-                    extra = f" _{extra}_" if extra else ""
-                    lines.append(f"  {icon} [{it['title'][:70]}]({it['link']}) ({it['source']}){extra}")
-            lines.append("")
-    else:
-        lines.append("_Keine aktuellen News gefunden (RSS leer/unerreichbar)._")
-        lines.append("")
+    # Transcribe the most recent YouTube videos (token-bounded) to enrich synthesis
+    yt = sorted([it for it in items if it["type"] == "youtube"],
+                key=lambda x: x.get("published", ""), reverse=True)
+    for it in yt[:max_video_summaries]:
+        transcript = _youtube_transcript(it["link"])
+        if transcript:
+            try:
+                s = call_json(
+                    VIDEO_SUMMARY_PROMPT.format(title=it["title"], transcript=transcript),
+                    primary=cfg.llm_primary, fallback=cfg.llm_fallback,
+                )
+                it["summary"] = s.get("summary", "") or it["summary"]
+            except Exception as e:
+                log.warning("video summary failed: %s", e)
+
+    item_block = "\n".join(
+        f"- [{it['source']} | {_age_label(it.get('published',''))}] {it['title']} — {it['summary'][:160]} <{it['link']}>"
+        for it in items
+    )
+    try:
+        result = call_json(
+            SYNTHESIS_PROMPT.format(
+                window_days=window_days,
+                topics="\n".join(f"- {t}" for t in topics),
+                memory=memory.context() or "(nichts)",
+                items=item_block,
+            ),
+            primary=cfg.llm_primary, fallback=cfg.llm_fallback,
+        )
+        briefing = result.get("briefing", "").strip()
+    except Exception as e:
+        log.warning("news synthesis failed: %s", e)
+        briefing = "_Synthese fehlgeschlagen._"
+
+    out = [f"*📰 News-Briefing* _(letzte {window_days}d)_", "", briefing]
 
     if accelerators:
-        lines.append("*🚀 Accelerator / Programme:*")
+        out += ["", "*🚀 Accelerator / Programme:*"]
         for a in accelerators:
-            dl = a.get("next_deadline", "rolling")
-            lines.append(f"  • [{a['name']}]({a.get('url','')}) — {dl}")
-        lines.append("")
-        lines.append("_Deadlines kuratiert — vor Bewerbung auf Website prüfen._")
+            out.append(f"  • [{a['name']}]({a.get('url','')}) — {a.get('next_deadline','rolling')}")
 
-    return "\n".join(lines)
+    # Mark this request time so the next briefing only covers what's new since now
+    state_mod.set_key("last_news_ts", datetime.now(timezone.utc).isoformat())
+    return "\n".join(out)

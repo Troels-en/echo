@@ -1,0 +1,22 @@
+# News-briefing config. Copy to interests.yml and customize.
+#   cp config/interests.example.yml config/interests.yml
+#
+# Echo fetches the RSS feeds, then LLM-filters items against `topics`.
+# RSS is free, no API key needed.
+
+topics:
+  - AI / LLM developments (new models, agent tooling)
+  - Startup and tech industry news
+  - Tools and frameworks worth following
+
+rss_feeds:
+  - name: The Decoder (AI)
+    url: https://the-decoder.com/feed/
+  - name: TechCrunch
+    url: https://techcrunch.com/feed/
+  - name: Hacker News (front page)
+    url: https://hnrss.org/frontpage
+
+# Optional curated deadlines/programs surfaced in the news briefing.
+# Format: name | url | next_deadline (ISO date or "rolling") | note
+accelerators: []

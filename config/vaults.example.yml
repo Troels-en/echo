@@ -1,0 +1,50 @@
+# Vault routing + Todoist mapping. Copy to vaults.yml and customize.
+#   cp config/vaults.example.yml config/vaults.yml
+#
+# Echo autodetects every *_Vault directory under VAULT_ROOT (set in .env).
+# - keywords: help the LLM route ambiguous notes
+# - todoist_project: where tasks for this vault go (null = Todoist Inbox)
+# - default_labels: labels auto-applied to tasks from this vault
+# - create_tasks: false to never create tasks (e.g. a pure journal)
+# A note with confidence < 0.7 routes to the `default` vault for review.
+
+vaults:
+  Ideas_Vault:
+    keywords: [idea, concept, brainstorm, product, project, what if]
+    todoist_project: Ideas
+
+  Work_Vault:
+    keywords: [work, meeting, deadline, client, project, deliverable, email]
+    todoist_project: Work
+
+  Health_Vault:
+    keywords: [workout, training, run, gym, nutrition, sleep, health]
+    todoist_project: Health
+
+  Personal_Vault:
+    keywords: [family, friend, errand, home, gift, birthday, personal]
+    todoist_project: null
+    default_labels: [Personal]
+
+  Learning_Vault:
+    keywords: [book, course, article, study, learn, research, paper]
+    todoist_project: null
+
+  Journal_Vault:
+    keywords: [today, reflect, feeling, mood, gratitude, diary]
+    todoist_project: null
+    create_tasks: false
+
+  Inbox_Vault:
+    keywords: []
+    default: true  # fallback when confidence < 0.7
+    todoist_project: null
+
+# Cross-cut labels the LLM applies by MEANING (not 1:1 with vaults).
+# Define each clearly — the LLM uses these descriptions to choose.
+labels:
+  Personal: "Personal life: family, friends, errands, home"
+  Work: "Job, clients, meetings, professional deliverables"
+  Finance: "Money: budget, invest, bills, taxes"
+  Health: "Fitness, nutrition, sleep, wellbeing"
+available_labels: [Personal, Work, Finance, Health]

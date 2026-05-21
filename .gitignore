@@ -1,0 +1,21 @@
+# Secrets — NEVER commit
+.env
+secrets/
+
+# Personal config (ships as *.example.yml; your real one stays local)
+config/vaults.yml
+config/interests.yml
+
+# Runtime state (created automatically by the app): models, vector store,
+# memory, chat state, audio temp. None of this belongs in the repo.
+data/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# OS / logs
+.DS_Store
+*.log
+node_modules/

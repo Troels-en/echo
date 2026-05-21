@@ -1,0 +1,263 @@
+"""Classify transcript and write markdown note into the right vault.
+Optionally also creates a Todoist task if the note is actionable.
+"""
+from __future__ import annotations
+
+import logging
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+
+from .config import Config, VaultSpec, REPO_ROOT
+from .llm import call_json
+from . import store, memory
+
+log = logging.getLogger(__name__)
+
+CONFIDENCE_THRESHOLD = 0.7
+# L2 distance on normalized vectors: d = 2(1-cos). MiniLM clusters related content
+# around 0.9-1.1; d<1.1 ≈ cos>0.45 captures related notes without linking noise.
+RELATED_MAX_DISTANCE = 1.1
+RELATED_MAX_LINKS = 5
+
+
+def _load_vault_routing() -> dict:
+    """Load vaults.yml; fall back to the shipped example for fresh clones."""
+    path = REPO_ROOT / "config" / "vaults.yml"
+    if not path.exists():
+        path = REPO_ROOT / "config" / "vaults.example.yml"
+    with path.open() as f:
+        return yaml.safe_load(f)
+
+
+CLASSIFY_PROMPT = """You are the router AND classifier for a personal voice-vault assistant. Do BOTH in one step.
+
+NOW (user local time, Europe/Berlin): {now}
+
+WHAT YOU KNOW ABOUT THE USER (use to disambiguate names/projects; do NOT re-extract these):
+{memory}
+
+STEP 1 — INTENT. Decide what the user wants:
+- "query"    — asking a question wanting an answer from their notes ("Was waren meine besten Ideen?", "Wie war mein letzter Lauf?")
+- "complete" — reporting finished task(s) ("Habe X gekauft", "Bewerbung verschickt", "die letzten drei Punkte erledigt")
+- "event"    — wants a CALENDAR appointment with a specific date/time ("Trag morgen 15 Uhr Zahnarzt ein", "Meeting Donnerstag 10 Uhr")
+- "mail"      — wants the assistant to check/read/triage their email ("Check meine Mails", "Was ist in meinem Postfach", "übernimm meine Mails")
+- "news"      — wants news / latest developments ("Was gibt's Neues", "news", "Entwicklungen in KI", "Accelerator-Deadlines")
+- "note"     — capturing a new thought, idea, observation, or future task (default)
+
+STEP 2 — only if intent is "note", classify it into a vault AND extract ALL distinct tasks.
+
+VAULTS (name → typical content):
+{vault_list}
+
+LABELS (apply by MEANING, not by vault):
+{labels}
+
+INPUT:
+\"\"\"{transcript}\"\"\"
+
+Return ONLY a JSON object, no prose:
+{{
+  "intent": "query" | "complete" | "note",
+  "intent_confidence": <float 0..1>,
+  "vault": "<vault name from list, or empty if intent != note>",
+  "confidence": <float 0..1>,
+  "title": "<short imperative title for the note, max 8 words>",
+  "tags": ["<3 to 5 short obsidian tags>"],
+  "summary": "<one sentence>",
+  "tasks": [
+    {{
+      "content": "<ONE concrete action, imperative>",
+      "due_string": "<'today'|'tomorrow'|'next monday'..'next sunday'|'<N> days'|'<DD MMM>' or empty>",
+      "priority": <4=urgent+important, 3=important not urgent, 2=urgent not important, 1=neither>,
+      "labels": [<0..N labels chosen by MEANING of THIS task>]
+    }}
+  ],
+  "event": {{
+    "summary": "<event title if intent=event, else empty>",
+    "start": "<ISO 8601 datetime resolved against NOW, e.g. 2026-05-22T15:00:00, or empty>",
+    "end": "<ISO 8601 or empty (defaults to +1h)>",
+    "location": "<if mentioned, else empty>"
+  }},
+  "new_facts": [
+    {{"text": "<durable fact about the user worth remembering long-term>", "type": "person|preference|project|pattern"}}
+  ],
+  "mail_action": {{
+    "action": "<if intent=mail: 'triage' (general check) | 'search' (looking for specific mail) | 'clean' (tidy inbox/remove junk), else empty>",
+    "search_terms": "<Gmail search query if action=search, e.g. 'from:katha' or 'Langdock', else empty>"
+  }}
+}}
+
+Rules:
+- Default intent to "note" if unsure. "query" only if asking for info FROM notes. "complete" only if reporting DONE work. "event" only if a specific date/time for an appointment is given — resolve relative dates ("morgen", "Donnerstag") against NOW into absolute ISO.
+- CRITICAL — SPLIT TASKS: if the input mentions multiple distinct actions, output ONE task object PER action. "Ich muss X und Y" → two tasks. Never merge two actions into one task.
+- A task is a concrete action to DO. Ideas, reflections, observations → NO task (empty "tasks" array).
+- Choose labels PER TASK by meaning. A personal job application = "Karriere", NOT "Career-Buddy". Career-Buddy label is ONLY for the user's Career-Buddy product itself.
+- priority defaults to 3; use 4 only if urgent/deadline/today.
+- Pick "Misc_Vault" if no vault fits. Be conservative with confidence.
+- new_facts: ONLY durable, reusable facts. Empty list if nothing durable. Never restate facts already in WHAT YOU KNOW.
+  Types: "person" (e.g. "Katha is a recruiter at Langdock"), "project" (e.g. "building Career-Buddy startup"), "preference", "pattern".
+  IMPORTANT — capture CORRECTIONS as type "pattern": if the user corrects routing/labeling or states a rule ("Bewerbungen gehören nach Karriere nicht Career-Buddy", "Lauf-Notizen sind Fitness nicht Journal", "nenn das immer X"), save it as a pattern fact so you route correctly next time."""
+
+
+def _slug(text: str, max_len: int = 50) -> str:
+    s = re.sub(r"[^a-zA-Z0-9]+", "-", text.lower()).strip("-")
+    return s[:max_len] or "note"
+
+
+def _vault_list(vaults: dict[str, VaultSpec]) -> str:
+    lines = []
+    for v in vaults.values():
+        kw = ", ".join(v.keywords) if v.keywords else "(fallback)"
+        lines.append(f"- {v.name}: {kw}")
+    return "\n".join(lines)
+
+
+def classify(transcript: str, cfg: Config) -> dict:
+    """Single LLM call: returns intent + (if note) full vault classification."""
+    routing = _load_vault_routing()
+    label_defs = routing.get("labels", {})
+    if label_defs:
+        labels_str = "\n".join(f"- {k}: {v}" for k, v in label_defs.items())
+    else:
+        labels_str = ", ".join(routing.get("available_labels", []))
+
+    now = datetime.now(timezone.utc).astimezone()
+    mem_context = memory.context() or "(noch nichts bekannt)"
+    prompt = CLASSIFY_PROMPT.format(
+        vault_list=_vault_list(cfg.vaults),
+        labels=labels_str,
+        now=now.strftime("%A %Y-%m-%d %H:%M"),
+        memory=mem_context,
+        transcript=transcript.replace('"""', "'''"),
+    )
+    result = call_json(prompt, primary=cfg.llm_primary, fallback=cfg.llm_fallback)
+
+    new_facts = result.get("new_facts") or []
+    if new_facts:
+        try:
+            n = memory.add_facts(new_facts)
+            if n:
+                log.info("memory: +%d facts", n)
+        except Exception as e:
+            log.warning("memory add failed: %s", e)
+
+    intent = result.get("intent", "note")
+    if intent not in ("query", "complete", "note", "event", "mail", "news"):
+        intent = "note"
+    result["intent"] = intent
+
+    if intent != "note":
+        return result  # vault routing irrelevant for query/complete/event
+
+    vault = result.get("vault") or cfg.default_vault
+    if vault not in cfg.vaults:
+        log.warning("LLM returned unknown vault %r → %s", vault, cfg.default_vault)
+        vault = cfg.default_vault
+        result["confidence"] = min(result.get("confidence", 0.0), 0.5)
+    result["vault"] = vault
+
+    if result.get("confidence", 0.0) < CONFIDENCE_THRESHOLD:
+        result["original_vault"] = vault
+        result["vault"] = cfg.default_vault
+
+    return result
+
+
+def vault_todoist_config(vault_name: str) -> tuple[str | None, list[str], bool]:
+    """Return (todoist_project_name, default_labels, create_tasks)."""
+    routing = _load_vault_routing()
+    spec = (routing.get("vaults") or {}).get(vault_name, {})
+    return (
+        spec.get("todoist_project"),
+        spec.get("default_labels", []) or [],
+        spec.get("create_tasks", True),
+    )
+
+
+def find_related(query: str, vault: str, cfg: Config, exclude_path: str | None = None) -> list:
+    """Return same-vault notes related to query (for [[wikilinks]]). Obsidian links are intra-vault."""
+    db = cfg.data_dir / "store.db"
+    if not db.exists():
+        return []
+    try:
+        hits = store.search(db, query, k=RELATED_MAX_LINKS + 2, vault=vault)
+    except Exception as e:
+        log.warning("find_related failed: %s", e)
+        return []
+    out = []
+    for h in hits:
+        if exclude_path and h.path == exclude_path:
+            continue
+        if h.distance > RELATED_MAX_DISTANCE:
+            continue
+        out.append(h)
+        if len(out) >= RELATED_MAX_LINKS:
+            break
+    return out
+
+
+def _wikilink(hit) -> str:
+    basename = Path(hit.path).stem  # filename without .md
+    title = (hit.title or basename).replace("]", "").replace("[", "")
+    return f"[[{basename}|{title}]]"
+
+
+def write_note(
+    transcript: str,
+    classification: dict,
+    cfg: Config,
+    tasks: list | None = None,
+    related: list | None = None,
+) -> Path:
+    """tasks: list of todoist Task objects. related: list of store.Hit for [[wikilinks]]."""
+    tasks = tasks or []
+    related = related or []
+    vault_name = classification["vault"]
+    spec = cfg.vaults[vault_name]
+    now = datetime.now(timezone.utc).astimezone()
+    date_str = now.strftime("%Y-%m-%d")
+    time_str = now.strftime("%H%M")
+
+    title = classification.get("title") or transcript[:50]
+    slug = _slug(title)
+    inbox = spec.path / "inbox"
+    inbox.mkdir(exist_ok=True)
+    note_path = inbox / f"{date_str}-{time_str}-{slug}.md"
+
+    tags = classification.get("tags", [])
+    summary = classification.get("summary", "")
+
+    fm = [
+        "---",
+        f'created: {now.isoformat(timespec="seconds")}',
+        f"source: voice",
+        f'confidence: {classification.get("confidence", 0):.2f}',
+        f'tags: [{", ".join(tags)}]',
+    ]
+    if "original_vault" in classification:
+        fm.append(f'original_vault: {classification["original_vault"]}')
+    if tasks:
+        fm.append(f'todoist_task_ids: [{", ".join(t.id for t in tasks)}]')
+    fm.append("---")
+
+    body = ["", f"# {title}", ""]
+    if summary:
+        body += [f"> {summary}", ""]
+    if tasks:
+        body.append("## Tasks")
+        for t in tasks:
+            body.append(f"- [ ] [{t.content}]({t.url})")
+        body.append("")
+    if related:
+        body.append("## Related")
+        for h in related:
+            body.append(f"- {_wikilink(h)}")
+        body.append("")
+    body += ["## Transcript", "", transcript, ""]
+
+    note_path.write_text("\n".join(fm + body), encoding="utf-8")
+    log.info("wrote note: %s (%d tasks, %d links)", note_path, len(tasks), len(related))
+    return note_path

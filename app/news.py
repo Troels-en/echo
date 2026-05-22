@@ -15,6 +15,12 @@ log = logging.getLogger(__name__)
 
 INTERESTS_FILE = REPO_ROOT / "config" / "interests.yml"
 
+# Recency policy
+DEFAULT_WINDOW_HOURS = 36  # default coverage window when there's no prior request
+MIN_WINDOW_HOURS = 12
+MAX_WINDOW_HOURS = 14 * 24
+HARD_CAP_DAYS = 14  # never surface anything older than this, even flagged
+
 
 def _load_interests() -> dict:
     path = INTERESTS_FILE
@@ -26,8 +32,19 @@ def _load_interests() -> dict:
         return yaml.safe_load(f) or {}
 
 
-def _fetch_rss(feeds: list[dict], per_feed: int = 6, max_age_days: int = 4) -> list[dict]:
-    cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+def _classify_recency(pub: datetime | None, window_hours: int) -> str:
+    """recent = within window · older = dated but past window · unknown = no date."""
+    if pub is None:
+        return "unknown"
+    if pub < datetime.now(timezone.utc) - timedelta(hours=window_hours):
+        return "older"
+    return "recent"
+
+
+def _fetch_rss(feeds: list[dict], window_hours: int, per_feed: int = 6) -> list[dict]:
+    # Keep items within a generous hard cap; recency vs. the window is *flagged*,
+    # not silently dropped, so the briefing can be honest about stale/undated items.
+    hard_cut = datetime.now(timezone.utc) - timedelta(days=HARD_CAP_DAYS)
     items = []
     for feed in feeds:
         try:
@@ -36,7 +53,7 @@ def _fetch_rss(feeds: list[dict], per_feed: int = 6, max_age_days: int = 4) -> l
                 pub = None
                 if getattr(e, "published_parsed", None):
                     pub = datetime(*e.published_parsed[:6], tzinfo=timezone.utc)
-                if pub and pub < cutoff:
+                if pub and pub < hard_cut:
                     continue
                 items.append({
                     "type": "article",
@@ -45,14 +62,15 @@ def _fetch_rss(feeds: list[dict], per_feed: int = 6, max_age_days: int = 4) -> l
                     "summary": getattr(e, "summary", "")[:300],
                     "link": getattr(e, "link", ""),
                     "published": pub.isoformat() if pub else "",
+                    "recency": _classify_recency(pub, window_hours),
                 })
         except Exception as ex:
             log.warning("rss fetch failed %s: %s", feed.get("url"), ex)
     return items
 
 
-def _fetch_youtube(channels: list[dict], per_channel: int = 3, max_age_days: int = 7) -> list[dict]:
-    cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+def _fetch_youtube(channels: list[dict], window_hours: int, per_channel: int = 3) -> list[dict]:
+    hard_cut = datetime.now(timezone.utc) - timedelta(days=HARD_CAP_DAYS)
     items = []
     for ch in channels:
         cid = ch.get("channel_id")
@@ -65,7 +83,7 @@ def _fetch_youtube(channels: list[dict], per_channel: int = 3, max_age_days: int
                 pub = None
                 if getattr(e, "published_parsed", None):
                     pub = datetime(*e.published_parsed[:6], tzinfo=timezone.utc)
-                if pub and pub < cutoff:
+                if pub and pub < hard_cut:
                     continue
                 items.append({
                     "type": "youtube",
@@ -74,6 +92,7 @@ def _fetch_youtube(channels: list[dict], per_channel: int = 3, max_age_days: int
                     "summary": "",
                     "link": getattr(e, "link", ""),
                     "published": pub.isoformat() if pub else "",
+                    "recency": _classify_recency(pub, window_hours),
                 })
         except Exception as ex:
             log.warning("youtube fetch failed %s: %s", cid, ex)
@@ -123,37 +142,87 @@ Return ONLY JSON: {{"summary": "<max 20 words>"}}"""
 
 SYNTHESIS_PROMPT = """You are writing a personal news briefing for an AI-focused founder. SYNTHESIZE — do not just list items.
 
-WINDOW: news from the last {window_days} day(s). Emphasize TODAY and YESTERDAY most.
+WINDOW: this briefing covers the {window_label}. Emphasize the most recent items most.
 
 USER INTERESTS:
 {topics}
 
-WHAT YOU KNOW ABOUT THE USER (bias toward these):
+WHAT YOU KNOW ABOUT THE USER (use this to explain personal relevance):
 {memory}
 
-ITEMS (source | age | title | snippet) — articles + video summaries:
+ITEMS — each line: [source | DATE | recency-flag] title — snippet <link>
+- recency-flag "⚠älter" = older than the window; "⚠Datum unklar" = no reliable date.
 {items}
 
-Write a tight, synthesized briefing in German Markdown:
+Write a tight, synthesized briefing in German Markdown. For EVERY story:
 - GROUP related items into themes/stories. Do NOT echo items 1:1.
+- State the publication DATE of the source(s) inline (e.g. "(22.05.)"). This is mandatory — the reader must see how recent each story is.
+- If a story rests on a "⚠älter" or "⚠Datum unklar" item, say so explicitly (e.g. "(Datum unklar)") instead of presenting it as fresh news.
 - A story covered by MULTIPLE sources = more important → lead with it, note the corroboration.
-- Prioritize the most recent (today/yesterday) over older.
-- For each story: 1-2 sentences of substance + the single best link as a Markdown link.
+- 1-2 sentences of substance + the single best link as a Markdown link.
+- If the item is technical or uses jargon, add a short plain-German explanation a non-expert understands ("Einfach gesagt: …").
+- Add one line "→ Für dich:" tying the story to the user's interests/context above (why it matters to THEM specifically). Skip only if there is genuinely no connection.
 - Skip filler, clickbait, off-topic. Quality over quantity — 3 to 6 strong stories is ideal.
 - End with one line: any cross-cutting trend you noticed.
 
 Return ONLY JSON: {{"briefing": "<markdown briefing>"}}"""
 
 
-def _age_label(iso: str) -> str:
+ACCEL_PROMPT = """For each accelerator/founder program below, write ONE short German sentence explaining why it is relevant to THIS user, based on their interests and context. Be concrete, no filler.
+
+USER INTERESTS:
+{topics}
+
+WHAT YOU KNOW ABOUT THE USER:
+{memory}
+
+PROGRAMS:
+{programs}
+
+Return ONLY JSON: {{"reasons": {{"<program name>": "<one German sentence>", ...}}}}"""
+
+
+def _date_label(iso: str) -> str:
+    """Absolute publication date, e.g. '22.05.'. 'Datum unklar' when missing."""
     if not iso:
-        return "?"
+        return "Datum unklar"
     try:
-        dt = datetime.fromisoformat(iso)
-        days = (datetime.now(timezone.utc) - dt).days
-        return {0: "heute", 1: "gestern"}.get(days, f"vor {days}d")
+        return datetime.fromisoformat(iso).strftime("%d.%m.")
     except Exception:
-        return "?"
+        return "Datum unklar"
+
+
+_RECENCY_FLAG = {"older": " ⚠älter", "unknown": " ⚠Datum unklar"}
+
+
+def _window_label(window_hours: int) -> str:
+    """Human window for the header: 'letzte 36h' under 48h, else 'letzte Nd'."""
+    if window_hours < 48:
+        return f"letzte {window_hours}h"
+    return f"letzte {round(window_hours / 24)}d"
+
+
+def _accelerator_reasons(accelerators: list[dict], topics: list[str], mem_ctx: str, cfg: Config) -> dict:
+    """One German relevance sentence per program. Falls back to {} (caller uses notes)."""
+    if not accelerators:
+        return {}
+    programs = "\n".join(
+        f"- {a['name']}: {a.get('note', '')}".rstrip(": ") for a in accelerators
+    )
+    try:
+        result = call_json(
+            ACCEL_PROMPT.format(
+                topics="\n".join(f"- {t}" for t in topics),
+                memory=mem_ctx,
+                programs=programs,
+            ),
+            primary=cfg.llm_primary, fallback=cfg.llm_fallback,
+        )
+        reasons = result.get("reasons", {})
+        return reasons if isinstance(reasons, dict) else {}
+    except Exception as e:
+        log.warning("accelerator reasons failed: %s", e)
+        return {}
 
 
 def build_news_briefing(cfg: Config, max_video_summaries: int = 2) -> str:
@@ -164,20 +233,20 @@ def build_news_briefing(cfg: Config, max_video_summaries: int = 2) -> str:
     channels = interests.get("youtube_channels", []) or []
     accelerators = interests.get("accelerators", [])
 
-    # Recency window = time since last news request (min 1 day, default 3 on first run)
+    # Recency window = time since last news request, in hours (default 36h on first run).
     st = state_mod.load()
     last_ts = st.get("last_news_ts")
-    window_days = 3
+    window_hours = DEFAULT_WINDOW_HOURS
     if last_ts:
         try:
             delta = datetime.now(timezone.utc) - datetime.fromisoformat(last_ts)
-            window_days = max(1, min(14, delta.days + 1))
+            window_hours = max(MIN_WINDOW_HOURS, min(MAX_WINDOW_HOURS, round(delta.total_seconds() / 3600)))
         except Exception:
             pass
 
-    items = _fetch_rss(feeds, max_age_days=window_days) + _fetch_youtube(channels, max_age_days=window_days)
+    items = _fetch_rss(feeds, window_hours) + _fetch_youtube(channels, window_hours)
     if not items:
-        return "*📰 News-Briefing*\n\n_Keine aktuellen News im Fenster gefunden._"
+        return f"*📰 News-Briefing* _({_window_label(window_hours)})_\n\n_Keine aktuellen News im Fenster gefunden._"
 
     # Transcribe the most recent YouTube videos (token-bounded) to enrich synthesis
     yt = sorted([it for it in items if it["type"] == "youtube"],
@@ -194,16 +263,18 @@ def build_news_briefing(cfg: Config, max_video_summaries: int = 2) -> str:
             except Exception as e:
                 log.warning("video summary failed: %s", e)
 
+    mem_ctx = memory.context() or "(nichts)"
     item_block = "\n".join(
-        f"- [{it['source']} | {_age_label(it.get('published',''))}] {it['title']} — {it['summary'][:160]} <{it['link']}>"
+        f"- [{it['source']} | {_date_label(it.get('published',''))}{_RECENCY_FLAG.get(it.get('recency',''), '')}] "
+        f"{it['title']} — {it['summary'][:160]} <{it['link']}>"
         for it in items
     )
     try:
         result = call_json(
             SYNTHESIS_PROMPT.format(
-                window_days=window_days,
+                window_label=_window_label(window_hours),
                 topics="\n".join(f"- {t}" for t in topics),
-                memory=memory.context() or "(nichts)",
+                memory=mem_ctx,
                 items=item_block,
             ),
             primary=cfg.llm_primary, fallback=cfg.llm_fallback,
@@ -213,12 +284,16 @@ def build_news_briefing(cfg: Config, max_video_summaries: int = 2) -> str:
         log.warning("news synthesis failed: %s", e)
         briefing = "_Synthese fehlgeschlagen._"
 
-    out = [f"*📰 News-Briefing* _(letzte {window_days}d)_", "", briefing]
+    out = [f"*📰 News-Briefing* _({_window_label(window_hours)})_", "", briefing]
 
     if accelerators:
+        reasons = _accelerator_reasons(accelerators, topics, mem_ctx, cfg)
         out += ["", "*🚀 Accelerator / Programme:*"]
         for a in accelerators:
             out.append(f"  • [{a['name']}]({a.get('url','')}) — {a.get('next_deadline','rolling')}")
+            reason = reasons.get(a["name"]) or a.get("note", "")
+            if reason:
+                out.append(f"     ↳ _{reason}_")
 
     # Mark this request time so the next briefing only covers what's new since now
     state_mod.set_key("last_news_ts", datetime.now(timezone.utc).isoformat())

@@ -1,5 +1,5 @@
 [project]
-name = "voicevault"
+name = "echo_vault"
 version = "0.1.0"
 description = "Voice-first second brain. Speak ideas, auto-routed to Obsidian vaults."
 requires-python = ">=3.11"

@@ -20,10 +20,10 @@ from telegram.request import HTTPXRequest
 
 from .config import Config
 from .transcribe import transcribe, TranscribeError
-from .vault import classify, write_note, vault_todoist_config, find_related
+from .vault import classify, write_note, write_answer_note, vault_todoist_config, find_related
 from .llm import LLMError
 from . import todoist as td
-from . import store, rag, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod
+from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod
 
 log = logging.getLogger(__name__)
 
@@ -208,6 +208,10 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await progress.delete()
             await _send_news(cfg, msg)
             return
+        if intent == "ask":
+            await progress.delete()
+            await _answer_ask(transcript, cfg, msg)
+            return
 
         tasks = await _create_tasks(classification)
         related = await asyncio.to_thread(find_related, transcript, classification["vault"], cfg)
@@ -279,6 +283,46 @@ async def _answer_query(question: str, cfg: Config, msg) -> None:
         await progress.edit_text(out, parse_mode="Markdown")
     except Exception as e:
         log.exception("ask failed")
+        await progress.edit_text(f"❌ Fehler: {e}")
+
+
+async def _answer_ask(question: str, cfg: Config, msg) -> None:
+    """General question → LLM (with optional web research) → reply + always save to vault."""
+    progress = await msg.reply_text("🤔 Denke nach...")
+    try:
+        result = await asyncio.to_thread(ask_mod.smart_answer, question, cfg)
+        answer = result.get("answer", "").strip() or "Keine Antwort."
+
+        note_path = None
+        try:
+            note_path = await asyncio.to_thread(write_answer_note, question, result, cfg)
+            try:
+                await asyncio.to_thread(
+                    store.upsert_note, cfg.data_dir / "store.db",
+                    str(note_path.resolve()), result["vault"],
+                    result.get("title", ""), question, answer,
+                )
+            except Exception as e:
+                log.error("indexing answer failed (note still written): %s", e)
+        except Exception as e:
+            log.error("saving answer note failed: %s", e)
+
+        web_tag = "🌐 Web-Recherche" if result.get("used_web") else "💬 LLM"
+        footer = f"\n\n_{web_tag} · ⭐ {result.get('importance', 3)}/5"
+        if note_path:
+            try:
+                rel = note_path.relative_to(cfg.vault_root)
+                footer += f" · 📄 `{rel}`"
+            except Exception:
+                pass
+        footer += "_"
+
+        out = answer + footer
+        if len(out) > 4000:
+            out = answer[: 3900 - len(footer)] + "\n\n_(gekürzt)_" + footer
+        await progress.edit_text(out, parse_mode="Markdown")
+    except Exception as e:
+        log.exception("ask (general) failed")
         await progress.edit_text(f"❌ Fehler: {e}")
 
 
@@ -470,7 +514,7 @@ async def _present_completion_candidates(text: str, cfg: Config, msg) -> None:
 
 
 async def cmd_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Explicit /ask still supported as escape hatch."""
+    """Force a general-knowledge / research answer (bypass the auto-router)."""
     cfg: Config = ctx.application.bot_data["cfg"]
     if not _is_allowed(update, cfg):
         await update.message.reply_text("Nicht autorisiert.")
@@ -478,11 +522,12 @@ async def cmd_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     question = " ".join(ctx.args) if ctx.args else ""
     if not question.strip():
         await update.message.reply_text(
-            "Nutzung: `/ask <frage>` — oder schreib einfach deine Frage ohne Slash.",
+            "Nutzung: `/ask <frage>` — allgemeine Frage / Recherche. "
+            "Für Fragen an deine Notizen schreib einfach ohne Slash.",
             parse_mode="Markdown",
         )
         return
-    await _answer_query(question, cfg, update.message)
+    await _answer_ask(question, cfg, update.message)
 
 
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -514,6 +559,9 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if intent == "news":
         await _send_news(cfg, msg)
+        return
+    if intent == "ask":
+        await _answer_ask(text, cfg, msg)
         return
     await _ingest_text(text, cfg, msg, classification=classification)
 

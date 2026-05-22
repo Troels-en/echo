@@ -71,9 +71,19 @@ Then the user messages their bot `/start` on Telegram. Confirm it responds.
 
 ## Architecture (where things live)
 - `app/bot.py` — Telegram handlers + intent routing
-- `app/vault.py` — LLM classify (intent + vault + tasks + facts), note writing, backlinks
+- `app/vault.py` — LLM classify (intent + vault + tasks + facts), note writing (`write_note`, `write_answer_note`), backlinks
+- `app/ask.py` — general-question answering (`smart_answer`): quick LLM answer, escalates to `claude -p` + web research when warranted
 - `app/rag.py` + `app/store.py` + `app/embed.py` — semantic search / RAG
 - `app/todoist.py`, `app/gcal.py` — integrations (Todoist, Google Calendar + Gmail)
 - `app/mailtriage.py`, `app/news.py`, `app/briefing.py` — email, news, daily briefing
 - `app/memory.py` — durable personalization facts
 - `config/*.yml` — vault routing + news interests
+
+## Intents (auto-routed by `vault.classify`)
+`note` (default, → vault) · `query` (RAG over user's OWN notes) · `complete` (close Todoist tasks) · `event` (calendar) · `mail` · `news` · `ask` (general/world question or live research → `ask.smart_answer`).
+- `ask` answers are ALWAYS saved via `write_answer_note`: tagged `#echo/answer`, with `importance: 1..5` and `web_research:` frontmatter. `/ask <q>` forces the ask path; plain text/voice is auto-routed.
+- Web research = `claude -p` with web tools allowed. This account's web path is the **exa MCP** (`mcp__exa__web_search_exa`); `app/llm.research_web` allowlists both builtin WebSearch/WebFetch and the exa MCP tools. Tune model/timeout via `ASK_MODEL` / `ASK_WEB_TIMEOUT`.
+
+## Roadmap (Phase 2 — not built yet)
+- **Weekly cleanup job:** `claude -p` reviews `#echo/answer` notes, re-sorts into best vault, dedups, prunes low-`importance`. (Importance frontmatter exists to support this.)
+- **NotebookLM podcast:** turn the daily/news briefing into an audio podcast.

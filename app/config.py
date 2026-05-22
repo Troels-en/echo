@@ -35,6 +35,8 @@ class Config:
     vaults: dict[str, VaultSpec]
     default_vault: str
     data_dir: Path
+    ask_model: str
+    ask_web_timeout: int
 
     @classmethod
     def load(cls) -> "Config":
@@ -90,4 +92,6 @@ class Config:
             vaults=vaults,
             default_vault=default_vault,
             data_dir=data_dir,
+            ask_model=os.getenv("ASK_MODEL", "sonnet"),
+            ask_web_timeout=int(os.getenv("ASK_WEB_TIMEOUT", "300")),
         )

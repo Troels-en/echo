@@ -45,6 +45,7 @@ STEP 1 — INTENT. Decide what the user wants:
 - "event"    — wants a CALENDAR appointment with a specific date/time ("Trag morgen 15 Uhr Zahnarzt ein", "Meeting Donnerstag 10 Uhr")
 - "mail"      — wants the assistant to check/read/triage their email ("Check meine Mails", "Was ist in meinem Postfach", "übernimm meine Mails")
 - "news"      — wants news / latest developments ("Was gibt's Neues", "news", "Entwicklungen in KI", "Accelerator-Deadlines")
+- "ask"       — a GENERAL question about the world, facts, how-to, research — NOT about the user's own notes ("Was ist ein SAFE-Note?", "Erklär mir Vector-DBs", "Recherchier die besten Whisper-Modelle", "Wie funktioniert X?"). Use this when answering needs general knowledge or live research, not the user's vault.
 - "note"     — capturing a new thought, idea, observation, or future task (default)
 
 STEP 2 — only if intent is "note", classify it into a vault AND extract ALL distinct tasks.
@@ -60,7 +61,7 @@ INPUT:
 
 Return ONLY a JSON object, no prose:
 {{
-  "intent": "query" | "complete" | "note",
+  "intent": "query" | "complete" | "event" | "mail" | "news" | "ask" | "note",
   "intent_confidence": <float 0..1>,
   "vault": "<vault name from list, or empty if intent != note>",
   "confidence": <float 0..1>,
@@ -91,7 +92,7 @@ Return ONLY a JSON object, no prose:
 }}
 
 Rules:
-- Default intent to "note" if unsure. "query" only if asking for info FROM notes. "complete" only if reporting DONE work. "event" only if a specific date/time for an appointment is given — resolve relative dates ("morgen", "Donnerstag") against NOW into absolute ISO.
+- Default intent to "note" if unsure. "query" only if asking for info FROM the user's OWN notes. "ask" if it's a general/world/research question not about their notes. "complete" only if reporting DONE work. "event" only if a specific date/time for an appointment is given — resolve relative dates ("morgen", "Donnerstag") against NOW into absolute ISO.
 - CRITICAL — SPLIT TASKS: if the input mentions multiple distinct actions, output ONE task object PER action. "Ich muss X und Y" → two tasks. Never merge two actions into one task.
 - A task is a concrete action to DO. Ideas, reflections, observations → NO task (empty "tasks" array).
 - Choose labels PER TASK by meaning. A personal job application = "Karriere", NOT "Career-Buddy". Career-Buddy label is ONLY for the user's Career-Buddy product itself.
@@ -145,12 +146,12 @@ def classify(transcript: str, cfg: Config) -> dict:
             log.warning("memory add failed: %s", e)
 
     intent = result.get("intent", "note")
-    if intent not in ("query", "complete", "note", "event", "mail", "news"):
+    if intent not in ("query", "complete", "note", "event", "mail", "news", "ask"):
         intent = "note"
     result["intent"] = intent
 
     if intent != "note":
-        return result  # vault routing irrelevant for query/complete/event
+        return result  # vault routing irrelevant for query/complete/event/ask
 
     vault = result.get("vault") or cfg.default_vault
     if vault not in cfg.vaults:
@@ -260,4 +261,39 @@ def write_note(
 
     note_path.write_text("\n".join(fm + body), encoding="utf-8")
     log.info("wrote note: %s (%d tasks, %d links)", note_path, len(tasks), len(related))
+    return note_path
+
+
+def write_answer_note(question: str, result: dict, cfg: Config) -> Path:
+    """Persist an 'ask' answer (Q + A) into the vault with an importance ranking.
+    Tagged #echo/answer so a weekly cleanup job can re-sort / prune by importance.
+    """
+    vault_name = result.get("vault") or cfg.default_vault
+    if vault_name not in cfg.vaults:
+        vault_name = cfg.default_vault
+    spec = cfg.vaults[vault_name]
+    now = datetime.now(timezone.utc).astimezone()
+    date_str = now.strftime("%Y-%m-%d")
+    time_str = now.strftime("%H%M")
+
+    title = result.get("title") or question[:50]
+    slug = _slug(title)
+    inbox = spec.path / "inbox"
+    inbox.mkdir(exist_ok=True)
+    note_path = inbox / f"{date_str}-{time_str}-{slug}.md"
+
+    tags = list(result.get("tags", [])) + ["echo/answer"]
+    fm = [
+        "---",
+        f'created: {now.isoformat(timespec="seconds")}',
+        "source: ask",
+        f'importance: {result.get("importance", 3)}',
+        f'web_research: {str(result.get("used_web", False)).lower()}',
+        f'tags: [{", ".join(tags)}]',
+        "---",
+    ]
+    body = ["", f"# {title}", "", "## Frage", "", question, "", "## Antwort", "", result.get("answer", ""), ""]
+    note_path.write_text("\n".join(fm + body), encoding="utf-8")
+    log.info("wrote answer note: %s (importance=%s, web=%s)", note_path,
+             result.get("importance"), result.get("used_web"))
     return note_path

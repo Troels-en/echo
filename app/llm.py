@@ -67,3 +67,37 @@ def call_json(prompt: str, primary: str = "codex", fallback: str = "claude") -> 
             last_err = e
             continue
     raise LLMError(f"all LLM backends failed: {last_err}")
+
+
+def call_text(prompt: str, primary: str = "codex", fallback: str = "claude") -> str:
+    """Freeform answer (no JSON). Returns stripped stdout of first backend that succeeds."""
+    runners = {"codex": _run_codex, "claude": _run_claude}
+    last_err: Exception | None = None
+    for backend in (primary, fallback):
+        runner = runners.get(backend)
+        if not runner:
+            continue
+        try:
+            return runner(prompt).strip()
+        except Exception as e:
+            log.warning("%s failed: %s", backend, e)
+            last_err = e
+            continue
+    raise LLMError(f"all LLM backends failed: {last_err}")
+
+
+def research_web(question: str, model: str = "sonnet", timeout: int = 300) -> str:
+    """Deep answer via claude -p with web tools. Returns freeform text."""
+    cmd = [
+        CLAUDE_BIN, "-p", question,
+        "--allowedTools",
+        "WebSearch", "WebFetch",
+        "mcp__exa__web_search_exa", "mcp__exa__web_fetch_exa",
+        "--model", model,
+        "--output-format", "text",
+    ]
+    log.info("claude research (web, model=%s, len=%d)", model, len(question))
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if res.returncode != 0:
+        raise LLMError(f"claude research exit {res.returncode}: {res.stderr[-400:]}")
+    return res.stdout.strip()

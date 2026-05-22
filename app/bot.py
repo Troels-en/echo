@@ -23,7 +23,7 @@ from .transcribe import transcribe, TranscribeError
 from .vault import classify, write_note, write_answer_note, vault_todoist_config, find_related
 from .llm import LLMError
 from . import todoist as td
-from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod
+from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, overview as overview_mod
 
 log = logging.getLogger(__name__)
 
@@ -890,6 +890,24 @@ async def handle_completion_callback(update: Update, _ctx: ContextTypes.DEFAULT_
     await q.edit_message_text(txt)
 
 
+async def cmd_overview(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Aggregate everything fed into Echo → refresh the Obsidian dashboard + reply with a summary."""
+    cfg: Config = ctx.application.bot_data["cfg"]
+    if not _is_allowed(update, cfg):
+        return
+    progress = await update.message.reply_text("📊 Baue Übersicht...")
+    try:
+        stats = await asyncio.to_thread(overview_mod.aggregate, cfg)
+        await asyncio.to_thread(overview_mod.write_dashboard, cfg, stats)
+        text = overview_mod.build_telegram(stats)
+        if len(text) > 4000:
+            text = text[:3900] + "\n_(gekürzt)_"
+        await progress.edit_text(text, parse_mode="Markdown")
+    except Exception as e:
+        log.exception("overview failed")
+        await progress.edit_text(f"❌ Übersicht-Fehler: {e}")
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     # silence httpx URL leak (contains bot token)
@@ -922,6 +940,7 @@ def main() -> None:
     app.add_handler(CommandHandler("memory", cmd_memory))
     app.add_handler(CommandHandler("forget", cmd_forget))
     app.add_handler(CommandHandler("inbox", cmd_inbox))
+    app.add_handler(CommandHandler("overview", cmd_overview))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_done_callback, pattern=r"^done:"))

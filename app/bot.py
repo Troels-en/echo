@@ -730,37 +730,106 @@ async def handle_move_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
         await q.answer(f"Fehler: {e}", show_alert=True)
 
 
+async def _send_chunked(msg, text: str) -> None:
+    """Send Markdown text to Telegram, splitting on line boundaries under the 4096 limit."""
+    chunk = ""
+    for line in text.split("\n"):
+        if len(chunk) + len(line) + 1 > 3800:
+            await msg.reply_text(chunk, parse_mode="Markdown")
+            chunk = ""
+        chunk += line + "\n"
+    if chunk.strip():
+        await msg.reply_text(chunk, parse_mode="Markdown")
+
+
+def _memory_vault_dir(cfg: Config) -> Path:
+    """Personal_Vault if configured, else the default vault."""
+    name = "Personal_Vault" if "Personal_Vault" in cfg.vaults else cfg.default_vault
+    return cfg.vaults[name].path
+
+
 async def cmd_memory(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     cfg: Config = ctx.application.bot_data["cfg"]
     if not _is_allowed(update, cfg):
         return
-    facts = memory_mod.all_facts()
-    if not facts:
+    grouped = memory_mod.list_structured()
+    total = sum(len(v) for v in grouped.values())
+    if not total:
         await update.message.reply_text("Noch nichts gemerkt. Echo lernt beim Notizen-Aufnehmen.")
         return
-    by_type: dict[str, list[str]] = {}
-    for f in facts:
-        by_type.setdefault(f["type"], []).append(f["text"])
-    lines = [f"🧠 *Was ich über dich weiß ({len(facts)}):*", ""]
-    icons = {"person": "👤", "preference": "❤️", "project": "🚀", "pattern": "🔁", "fact": "·"}
-    for t, items in by_type.items():
-        lines.append(f"{icons.get(t,'·')} *{t}:*")
-        for it in items:
-            lines.append(f"  • {it}")
-    lines.append("\n_`/forget <stichwort>` zum Löschen._")
-    txt = "\n".join(lines)
-    await update.message.reply_text(txt[:4000], parse_mode="Markdown")
+    lines = [f"🧠 *Was ich über dich weiß ({total}):*", ""]
+    for t, items in grouped.items():
+        label = memory_mod.TYPE_LABELS.get(t, t)
+        lines.append(f"{memory_mod.TYPE_ICONS.get(t, '·')} *{label}:*")
+        for f in items:
+            lines.append(f"  `{f['id']}` {f['text']}")
+        lines.append("")
+    lines.append("_Bearbeiten: `/editmemory <id> <text>` · Löschen: `/forget <id>` · "
+                 "Obsidian-Übersicht: `/memorymd`_")
+    await _send_chunked(update.message, "\n".join(lines))
+
+
+async def cmd_editmemory(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    cfg: Config = ctx.application.bot_data["cfg"]
+    if not _is_allowed(update, cfg):
+        return
+    args = ctx.args or []
+    if len(args) < 2 or not args[0].isdigit():
+        await update.message.reply_text(
+            "Nutzung: `/editmemory <id> <neuer text>`", parse_mode="Markdown")
+        return
+    fact_id = int(args[0])
+    new_text = " ".join(args[1:]).strip()
+    if memory_mod.edit_fact(fact_id, new_text):
+        await update.message.reply_text(f"✏️ Fakt `{fact_id}` aktualisiert.", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"Kein Fakt mit id `{fact_id}`.", parse_mode="Markdown")
+
+
+async def cmd_mergememory(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    cfg: Config = ctx.application.bot_data["cfg"]
+    if not _is_allowed(update, cfg):
+        return
+    args = ctx.args or []
+    ids = [int(a) for a in args if a.isdigit()]
+    if len(ids) < 2:
+        await update.message.reply_text(
+            "Nutzung: `/mergememory <id-behalten> <id> [id ...]`", parse_mode="Markdown")
+        return
+    survivor = memory_mod.merge_facts(ids)
+    if survivor:
+        await update.message.reply_text(
+            f"🔗 {len(ids) - 1} Fakt(en) in `{survivor['id']}` zusammengeführt.",
+            parse_mode="Markdown")
+    else:
+        await update.message.reply_text("Zusammenführen fehlgeschlagen (id unbekannt?).")
+
+
+async def cmd_memorymd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    cfg: Config = ctx.application.bot_data["cfg"]
+    if not _is_allowed(update, cfg):
+        return
+    path = await asyncio.to_thread(memory_mod.export_markdown, _memory_vault_dir(cfg))
+    try:
+        rel = path.relative_to(cfg.vault_root)
+    except ValueError:
+        rel = path
+    await update.message.reply_text(f"📝 Übersicht aktualisiert: `{rel}`", parse_mode="Markdown")
 
 
 async def cmd_forget(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     cfg: Config = ctx.application.bot_data["cfg"]
     if not _is_allowed(update, cfg):
         return
-    sub = " ".join(ctx.args).strip() if ctx.args else ""
-    if not sub:
-        await update.message.reply_text("Nutzung: `/forget <stichwort>`", parse_mode="Markdown")
+    arg = " ".join(ctx.args).strip() if ctx.args else ""
+    if not arg:
+        await update.message.reply_text(
+            "Nutzung: `/forget <id>` oder `/forget <stichwort>`", parse_mode="Markdown")
         return
-    n = memory_mod.forget(sub)
+    if arg.isdigit() and memory_mod.delete_fact(int(arg)):
+        await update.message.reply_text(f"🗑️ Fakt `{arg}` gelöscht.", parse_mode="Markdown")
+        return
+    n = memory_mod.forget(arg)
     await update.message.reply_text(f"🗑️ {n} Fakt(en) gelöscht.")
 
 
@@ -921,6 +990,9 @@ def main() -> None:
     app.add_handler(CommandHandler("news", cmd_news))
     app.add_handler(CommandHandler("memory", cmd_memory))
     app.add_handler(CommandHandler("forget", cmd_forget))
+    app.add_handler(CommandHandler("editmemory", cmd_editmemory))
+    app.add_handler(CommandHandler("mergememory", cmd_mergememory))
+    app.add_handler(CommandHandler("memorymd", cmd_memorymd))
     app.add_handler(CommandHandler("inbox", cmd_inbox))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

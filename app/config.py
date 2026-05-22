@@ -37,6 +37,7 @@ class Config:
     data_dir: Path
     ask_model: str
     ask_web_timeout: int
+    doc_search_root: Path
 
     @classmethod
     def load(cls) -> "Config":
@@ -94,4 +95,5 @@ class Config:
             data_dir=data_dir,
             ask_model=os.getenv("ASK_MODEL", "sonnet"),
             ask_web_timeout=int(os.getenv("ASK_WEB_TIMEOUT", "300")),
+            doc_search_root=Path(os.path.expanduser(os.getenv("DOC_SEARCH_ROOT", "~/Documents"))).resolve(),
         )

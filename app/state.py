@@ -14,6 +14,7 @@ DEFAULTS = {
     "chat_id": None,
     "briefing_enabled": True,
     "briefing_time": "07:30",  # local Europe/Berlin
+    "voice_enabled": False,  # voice-memo replies (ElevenLabs TTS); toggle via /voice
 }
 
 

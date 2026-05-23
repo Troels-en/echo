@@ -23,7 +23,7 @@ from .transcribe import transcribe, TranscribeError
 from .vault import classify, write_note, write_answer_note, vault_todoist_config, find_related
 from .llm import LLMError
 from . import todoist as td
-from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod
+from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod
 
 log = logging.getLogger(__name__)
 
@@ -1123,6 +1123,32 @@ async def cmd_finddoc(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await progress.edit_text(text, parse_mode="Markdown")
 
 
+async def cmd_podcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Turn the daily briefing into a German audio podcast and send it as voice/audio."""
+    cfg: Config = ctx.application.bot_data["cfg"]
+    if not _is_allowed(update, cfg):
+        await update.message.reply_text("Nicht autorisiert.")
+        return
+    if update.effective_chat:
+        state_mod.set_key("chat_id", update.effective_chat.id)
+    progress = await update.message.reply_text("🎙️ Baue Podcast (Briefing → Skript → Audio)...")
+    try:
+        result = await asyncio.to_thread(podcast_mod.build_podcast, cfg)
+        await progress.edit_text(
+            f"🎧 Podcast fertig ({result.duration:.0f}s, {result.num_segments} Beiträge, {result.backend}).",
+        )
+        with result.path.open("rb") as f:
+            await update.message.reply_audio(
+                audio=f,
+                title="Echo Daily",
+                performer="Echo",
+                caption="🎧 Dein Tages-Briefing als Podcast.",
+            )
+    except Exception as e:
+        log.exception("podcast failed")
+        await progress.edit_text(f"❌ Podcast-Fehler: {e}")
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     # silence httpx URL leak (contains bot token)
@@ -1161,6 +1187,7 @@ def main() -> None:
     app.add_handler(CommandHandler("draft", cmd_draft))
     app.add_handler(CommandHandler("indexdocs", cmd_indexdocs))
     app.add_handler(CommandHandler("finddoc", cmd_finddoc))
+    app.add_handler(CommandHandler("podcast", cmd_podcast))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_done_callback, pattern=r"^done:"))

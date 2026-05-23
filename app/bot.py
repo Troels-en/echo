@@ -23,7 +23,7 @@ from .transcribe import transcribe, TranscribeError
 from .vault import classify, write_note, write_answer_note, vault_todoist_config, find_related
 from .llm import LLMError
 from . import todoist as td
-from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod
+from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod
 
 log = logging.getLogger(__name__)
 
@@ -833,6 +833,93 @@ async def cmd_forget(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"🗑️ {n} Fakt(en) gelöscht.")
 
 
+def _save_draft_note(brief: str, result: dict, cfg: Config):
+    """Persist a generated draft into Self_Vault/inbox so it is not lost."""
+    import re
+    from datetime import datetime, timezone
+    base = agents_mod.self_vault_dir(cfg) / "inbox"
+    base.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc).astimezone()
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", brief.lower()).strip("-")[:50] or "draft"
+    path = base / f"{now.strftime('%Y-%m-%d-%H%M')}-draft-{slug}.md"
+    fm = [
+        "---",
+        f'created: {now.isoformat(timespec="seconds")}',
+        "source: draft-agent",
+        f'agent: {result.get("agent", "")}',
+        "tags: [draft, anschreiben]",
+        "---",
+        "",
+        f"# Draft: {brief}",
+        "",
+        result.get("text", ""),
+        "",
+    ]
+    path.write_text("\n".join(fm), encoding="utf-8")
+    return path
+
+
+async def cmd_draft(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Generate a humanized German draft in the user's style from the Self_Vault.
+
+    Usage: /draft <brief>
+    First line = brief (what to write). Any following lines = job posting / source material.
+    """
+    cfg: Config = ctx.application.bot_data["cfg"]
+    if not _is_allowed(update, cfg):
+        await update.message.reply_text("Nicht autorisiert.")
+        return
+    raw = " ".join(ctx.args) if ctx.args else ""
+    # Prefer the full message text so multi-line postings survive (args collapses whitespace).
+    full = (update.message.text or "").split(maxsplit=1)
+    raw = full[1].strip() if len(full) > 1 else raw.strip()
+    if not raw:
+        await update.message.reply_text(
+            "Nutzung: `/draft <briefing>`\n"
+            "Erste Zeile = was geschrieben werden soll, danach optional die Stellenausschreibung.\n"
+            "Bsp: `/draft Anschreiben für Founders Associate bei Moonscale`",
+            parse_mode="Markdown",
+        )
+        return
+
+    lines = raw.split("\n", 1)
+    brief = lines[0].strip()
+    posting = lines[1].strip() if len(lines) > 1 else ""
+
+    progress = await update.message.reply_text("✍️ Schreibe Entwurf in deinem Stil...")
+    try:
+        result = await asyncio.to_thread(agents_mod.draft, brief, cfg, posting)
+        text = (result.get("text") or "").strip() or "Kein Entwurf erzeugt."
+
+        note_path = None
+        try:
+            note_path = await asyncio.to_thread(_save_draft_note, brief, result, cfg)
+        except Exception as e:
+            log.error("saving draft note failed: %s", e)
+
+        footer = f"\n\n_🤖 {result.get('agent', 'Draft')}-Agent"
+        if result.get("missing_self_vault"):
+            footer += " · ⚠️ Self_Vault leer"
+        if note_path:
+            try:
+                footer += f" · 📄 `{note_path.relative_to(cfg.vault_root)}`"
+            except Exception:
+                pass
+        footer += "_"
+
+        out = text + footer
+        if len(out) > 4000:
+            await update.message.reply_text(text[:4000])
+            if len(text) > 4000:
+                await update.message.reply_text(text[4000:8000])
+            await progress.edit_text(footer.strip(), parse_mode="Markdown")
+        else:
+            await progress.edit_text(out, parse_mode="Markdown")
+    except Exception as e:
+        log.exception("draft failed")
+        await progress.edit_text(f"❌ Fehler: {e}")
+
+
 async def handle_clean_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     if not q or not q.data or not q.data.startswith("clean:"):
@@ -994,6 +1081,7 @@ def main() -> None:
     app.add_handler(CommandHandler("mergememory", cmd_mergememory))
     app.add_handler(CommandHandler("memorymd", cmd_memorymd))
     app.add_handler(CommandHandler("inbox", cmd_inbox))
+    app.add_handler(CommandHandler("draft", cmd_draft))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_done_callback, pattern=r"^done:"))

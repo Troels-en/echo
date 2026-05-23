@@ -229,8 +229,16 @@ def _build_notebooklm(briefing_text: str, out_mp3: Path) -> None:
                 language="de",
                 instructions="Kurzer, lockerer deutscher Tagesüberblick zwischen zwei Moderatoren. Sprich den Hörer mit Du an.",
             )
-            # Audio Overview generation is slow + queue-dependent (often >10 min on free tier).
-            await client.artifacts.wait_for_completion(nb.id, status.task_id, timeout=900.0)
+            # Silent-failure mode: generate_audio returns None / no task_id on rate-limit or
+            # daily-quota hit (free ~3/day) instead of raising. Catch it early.
+            task_id = getattr(status, "task_id", None)
+            if not task_id:
+                raise PodcastError(
+                    "NotebookLM startete keine Audio-Generierung (vermutlich Rate-Limit "
+                    "oder Tageskontingent erreicht; free ~3/Tag)."
+                )
+            # Audio Overview is slow + queue-dependent: 10-20 min typical, longer at peak.
+            await client.artifacts.wait_for_completion(nb.id, task_id, timeout=1200.0)
             out_mp3.parent.mkdir(parents=True, exist_ok=True)
             await client.artifacts.download_audio(nb.id, str(out_mp3))
 

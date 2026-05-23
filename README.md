@@ -16,6 +16,7 @@ Send a voice note or text to your Telegram bot. Echo detects intent and routes a
 | "Remind me to call the dentist tomorrow" | Creates a Todoist task (split if multiple), Eisenhower priority |
 | "Meeting with Sara Thursday 3pm" | Creates a Google Calendar event (after you confirm) |
 | "What were my best ideas about X?" | RAG answer grounded in your own notes, with citations |
+| "Explain SAFE notes / research the best X" | General-knowledge answer; escalates to live web research when it helps |
 | "Did Sara reply yet?" | Searches your inbox and answers |
 | "Clean my mailbox" | Finds obvious junk, asks before trashing |
 | "What's new in AI?" | News briefing from your RSS feeds, filtered to your interests |
@@ -28,12 +29,20 @@ Every destructive or external action is **confirm-before-act**. Echo never silen
 - **Auto-categorization** — notes routed to the right Obsidian vault by an LLM
 - **Auto-backlinks** — new notes link to semantically related existing notes (`[[wikilinks]]`)
 - **RAG copilot** — ask questions, get answers grounded in your notes with citations
+- **General Q&A + web research** — `ask` intent answers world questions; escalates to live web research (`claude -p`), saves the answer with an importance rank
 - **Task management** — Todoist tasks, auto-split, Eisenhower priority, cross-cut labels
 - **Calendar** — natural-language event creation (Google Calendar)
 - **Email** — triage, intent-driven search, inbox cleanup (Gmail)
-- **Daily briefing** — morning push: today's calendar, due/overdue tasks, important overnight mail
-- **News briefing** — on-demand, RSS-based, LLM-filtered to your interests
-- **Memory** — learns durable facts about you and your routing corrections, gets more personal over time
+- **Daily + news briefing** — morning push; news with dates, recency check, plain-language explanations tied to your context
+- **Memory** — learns durable facts about you; inspect and correct them (`/memory`, `/editmemory`, `/forget`)
+
+### Added capabilities (commands)
+- **Voice replies** — `/voice on` makes Echo answer with a spoken voice memo (ElevenLabs TTS)
+- **Audio podcast** — `/podcast` turns the briefing into a German audio podcast
+- **Document search** — `/indexdocs` then `/finddoc <q>`: search documents on disk (`~/Documents`) + Gmail attachments, summarize, link into a vault
+- **Writing agent** — `/draft <brief>`: humanized German drafts (e.g. cover letters) in your own style, from a `Self_Vault` of facts + style about you
+- **Overview** — `/overview`: an Obsidian dashboard + Telegram summary + Notion mirror of everything you've fed in
+- **Progress stats** — `/stats`: usage, intent breakdown, streak, XP, with a chart
 
 ---
 
@@ -50,10 +59,14 @@ LLM router (one call)  ──►  intent + classification + facts
    │
    ├─ note   → vault Markdown + backlinks + Todoist tasks + vector index
    ├─ query  → RAG over sqlite-vec  → cited answer
+   ├─ ask    → LLM answer / live web research → saved with importance rank
    ├─ event  → Google Calendar (confirm)
    ├─ mail   → Gmail triage / search / clean (confirm)
    ├─ news   → RSS fetch + LLM relevance filter
    └─ complete → match open tasks → confirm → close
+
+Commands add: /voice (TTS replies) · /podcast (audio) · /finddoc (doc search)
+              /draft (style agent) · /overview (dashboard) · /stats (usage+XP)
 ```
 
 - **Storage:** plain Markdown (Obsidian-compatible) + SQLite (`sqlite-vec`) for embeddings
@@ -89,6 +102,9 @@ bash scripts/download_model.sh small        # or large-v3-turbo for best quality
 ### Optional integrations
 - **Todoist:** add `TODOIST_API_TOKEN` to `.env`, run `python scripts/setup_todoist.py`
 - **Google Calendar + Gmail:** see comments in `.env` — create OAuth credentials, run `python scripts/google_auth.py`
+- **Voice replies + podcast:** add `ELEVENLABS_API_KEY` to `.env` (text-to-speech + voices scopes). Falls back to macOS `say` if absent.
+- **Document search:** set `DOC_SEARCH_ROOT` in `.env` (default `~/Documents`), then `/indexdocs` in the bot.
+- **Notion mirror** (`/overview`): goes through the Claude Notion MCP; runs agent/cron-side, not in the bot process.
 
 ### Run
 ```bash

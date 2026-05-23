@@ -20,6 +20,7 @@ dependencies = [
     "matplotlib>=3.10.9",
     "google-genai>=2.6.0",
     "notebooklm-py>=0.4.1",
+    "rookiepy>=0.5.6",
 ]
 
 [tool.uv]

@@ -223,12 +223,13 @@ def _build_notebooklm(briefing_text: str, out_mp3: Path) -> None:
         async with await NotebookLMClient.from_storage() as client:
             title = f"Echo Daily {datetime.now():%Y-%m-%d %H:%M}"
             nb = await client.notebooks.create(title)
-            await client.sources.add_text(nb.id, briefing_text, wait=True)
+            await client.sources.add_text(nb.id, "Echo Daily Briefing", briefing_text, wait=True)
             status = await client.artifacts.generate_audio(
                 nb.id,
+                language="de",
                 instructions="Kurzer, lockerer deutscher Tagesüberblick zwischen zwei Moderatoren. Sprich den Hörer mit Du an.",
             )
-            await client.artifacts.wait_for_completion(nb.id, status.task_id)
+            await client.artifacts.wait_for_completion(nb.id, status.task_id, timeout=600.0)
             out_mp3.parent.mkdir(parents=True, exist_ok=True)
             await client.artifacts.download_audio(nb.id, str(out_mp3))
 

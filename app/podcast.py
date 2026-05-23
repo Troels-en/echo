@@ -45,7 +45,8 @@ SAY_VOICE_B = _env("PODCAST_SAY_VOICE_B", "Reed")
 
 # Gemini multi-speaker TTS (Path B). Two prebuilt voices; speaker labels in the transcript
 # must match the names registered in the multi-speaker config below.
-GEMINI_TTS_MODEL = _env("GEMINI_TTS_MODEL", "gemini-2.5-pro-tts")
+# flash-preview-tts has a free tier; pro-preview-tts is higher quality but needs billing.
+GEMINI_TTS_MODEL = _env("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
 GEMINI_VOICE_A = _env("GEMINI_VOICE_A", "Kore")   # host A (female)
 GEMINI_VOICE_B = _env("GEMINI_VOICE_B", "Puck")   # host B (male)
 _SPEAKER_NAME = {"A": "Anna", "B": "Reed"}

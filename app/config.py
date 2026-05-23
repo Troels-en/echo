@@ -38,6 +38,10 @@ class Config:
     ask_model: str
     ask_web_timeout: int
     doc_search_root: Path
+    elevenlabs_api_key: str
+    elevenlabs_voice_id: str
+    elevenlabs_model: str
+    tts_max_chars: int
 
     @classmethod
     def load(cls) -> "Config":
@@ -96,4 +100,8 @@ class Config:
             ask_model=os.getenv("ASK_MODEL", "sonnet"),
             ask_web_timeout=int(os.getenv("ASK_WEB_TIMEOUT", "300")),
             doc_search_root=Path(os.path.expanduser(os.getenv("DOC_SEARCH_ROOT", "~/Documents"))).resolve(),
+            elevenlabs_api_key=os.getenv("ELEVENLABS_API_KEY", "").strip(),
+            elevenlabs_voice_id=os.getenv("ELEVENLABS_VOICE_ID", "").strip() or "JBFqnCBsd6RMkjVDRZzb",
+            elevenlabs_model=os.getenv("ELEVENLABS_MODEL", "").strip() or "eleven_multilingual_v2",
+            tts_max_chars=int(os.getenv("TTS_MAX_CHARS", "").strip() or "600"),
         )

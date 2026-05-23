@@ -23,7 +23,7 @@ from .transcribe import transcribe, TranscribeError
 from .vault import classify, write_note, write_answer_note, vault_todoist_config, find_related
 from .llm import LLMError
 from . import todoist as td
-from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod
+from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod, tts as tts_mod
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +72,7 @@ async def cmd_briefing(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         text = await asyncio.to_thread(briefing_mod.build_briefing, cfg)
         await progress.edit_text(text, parse_mode="Markdown")
+        await _maybe_send_voice(text, cfg, update.message)
     except Exception as e:
         log.exception("briefing failed")
         await progress.edit_text(f"❌ Briefing-Fehler: {e}")
@@ -328,9 +329,55 @@ async def _answer_ask(question: str, cfg: Config, msg) -> None:
         if len(out) > 4000:
             out = answer[: 3900 - len(footer)] + "\n\n_(gekürzt)_" + footer
         await progress.edit_text(out, parse_mode="Markdown")
+        await _maybe_send_voice(answer, cfg, msg)
     except Exception as e:
         log.exception("ask (general) failed")
         await progress.edit_text(f"❌ Fehler: {e}")
+
+
+async def _maybe_send_voice(text: str, cfg: Config, msg) -> None:
+    """When /voice is ON and TTS is configured, also send `text` as a voice memo.
+
+    Text reply is always kept; voice is additive. Never raises into the caller —
+    a TTS/transcode failure just logs and skips the voice memo.
+    """
+    if not state_mod.load().get("voice_enabled"):
+        return
+    if not tts_mod.available(cfg):
+        log.info("voice on but ELEVENLABS_API_KEY missing; skipping voice memo")
+        return
+    audio_path = None
+    try:
+        audio_path = await asyncio.to_thread(tts_mod.synthesize, text, cfg)
+        with audio_path.open("rb") as f:
+            await msg.reply_voice(voice=f)
+    except Exception as e:
+        log.error("voice synthesis/send failed (text reply already sent): %s", e)
+    finally:
+        if audio_path is not None:
+            audio_path.unlink(missing_ok=True)
+
+
+async def cmd_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle voice-memo replies. `/voice on|off`; no arg shows current state."""
+    cfg: Config = ctx.application.bot_data["cfg"]
+    if not _is_allowed(update, cfg):
+        await update.message.reply_text("Nicht autorisiert.")
+        return
+    arg = (ctx.args[0].lower() if ctx.args else "").strip()
+    if arg in ("on", "an", "ein"):
+        state_mod.set_key("voice_enabled", True)
+        extra = "" if tts_mod.available(cfg) else "\n⚠️ `ELEVENLABS_API_KEY` fehlt — kein Audio bis Key gesetzt."
+        await update.message.reply_text("🔊 Voice-Antworten AN." + extra, parse_mode="Markdown")
+    elif arg in ("off", "aus"):
+        state_mod.set_key("voice_enabled", False)
+        await update.message.reply_text("🔇 Voice-Antworten AUS.")
+    else:
+        on = state_mod.load().get("voice_enabled")
+        await update.message.reply_text(
+            f"Voice-Antworten: {'AN' if on else 'AUS'}. Nutzung: `/voice on` | `/voice off`.",
+            parse_mode="Markdown",
+        )
 
 
 def _pending_events(ctx) -> dict:
@@ -1239,6 +1286,7 @@ def main() -> None:
     app.add_handler(CommandHandler("podcast", cmd_podcast))
     app.add_handler(CommandHandler("overview", cmd_overview))
     app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("voice", cmd_voice))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_done_callback, pattern=r"^done:"))

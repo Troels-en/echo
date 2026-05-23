@@ -23,7 +23,7 @@ from .transcribe import transcribe, TranscribeError
 from .vault import classify, write_note, write_answer_note, vault_todoist_config, find_related
 from .llm import LLMError
 from . import todoist as td
-from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod
+from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +44,12 @@ def _to_wav(src: Path) -> Path:
     if res.returncode != 0:
         raise TranscribeError(f"ffmpeg failed: {res.stderr[-300:]}")
     return dst
+
+
+def _log_event(intent: str, classification: dict, text: str, source: str) -> None:
+    """Best-effort interaction logging for /stats. Never raises into handlers."""
+    vault = classification.get("vault") if intent == "note" else None
+    events_mod.log_event(intent=intent, vault=vault, input_len=len(text or ""), source=source)
 
 
 async def cmd_start(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -188,6 +194,7 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         classification = await asyncio.to_thread(classify, transcript, cfg)
         intent = classification.get("intent", "note")
         log.info("voice intent: %s", intent)
+        _log_event(intent, classification, transcript, "voice")
         if intent == "query":
             await progress.delete()
             await _answer_query(transcript, cfg, msg)
@@ -544,6 +551,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     classification = await asyncio.to_thread(classify, text, cfg)
     intent = classification.get("intent", "note")
     log.info("text intent: %s for %r", intent, text[:80])
+    _log_event(intent, classification, text, "text")
 
     if intent == "query":
         await _answer_query(text, cfg, msg)
@@ -1167,6 +1175,28 @@ async def cmd_overview(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await progress.edit_text(f"❌ Übersicht-Fehler: {e}")
 
 
+async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    cfg: Config = ctx.application.bot_data["cfg"]
+    if not _is_allowed(update, cfg):
+        return
+    progress = await update.message.reply_text("📊 Berechne Fortschritt...")
+    try:
+        await asyncio.to_thread(stats_mod.backfill, cfg)
+        stats = await asyncio.to_thread(stats_mod.compute, cfg)
+        summary = stats_mod.format_summary(stats)
+        chart_path = cfg.data_dir / "stats_chart.png"
+        png = await asyncio.to_thread(stats_mod.render_chart, stats, chart_path)
+        if png and png.exists():
+            await progress.delete()
+            with png.open("rb") as fh:
+                await update.message.reply_photo(photo=fh, caption=summary, parse_mode="Markdown")
+        else:
+            await progress.edit_text(summary, parse_mode="Markdown")
+    except Exception as e:
+        log.exception("stats failed")
+        await progress.edit_text(f"❌ Stats-Fehler: {e}")
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     # silence httpx URL leak (contains bot token)
@@ -1188,6 +1218,7 @@ def main() -> None:
     app.bot_data["cfg"] = cfg
     # Ensure vector store schema exists before serving
     store.init_schema(cfg.data_dir / "store.db")
+    events_mod.init_schema()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("id", cmd_id))
@@ -1207,6 +1238,7 @@ def main() -> None:
     app.add_handler(CommandHandler("finddoc", cmd_finddoc))
     app.add_handler(CommandHandler("podcast", cmd_podcast))
     app.add_handler(CommandHandler("overview", cmd_overview))
+    app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_done_callback, pattern=r"^done:"))

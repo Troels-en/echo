@@ -38,9 +38,26 @@ def _norm(text: str) -> str:
     return " ".join(text.lower().split())
 
 
+def _alloc_id(facts: list[dict]) -> int:
+    return max((int(f.get("id", 0)) for f in facts), default=0) + 1
+
+
+def _ensure_ids(facts: list[dict]) -> bool:
+    """Assign stable integer ids to any legacy facts missing one. Returns True if changed."""
+    changed = False
+    nxt = _alloc_id(facts)
+    for f in facts:
+        if not f.get("id"):
+            f["id"] = nxt
+            nxt += 1
+            changed = True
+    return changed
+
+
 def add_facts(new: list[dict]) -> int:
     """new: [{text, type}]. Dedupes by normalized text. Returns count added."""
     facts = _load()
+    changed = _ensure_ids(facts)
     existing = {_norm(f["text"]) for f in facts}
     added = 0
     now = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -51,12 +68,12 @@ def add_facts(new: list[dict]) -> int:
             continue
         if ftype not in VALID_TYPES:
             ftype = "fact"
-        facts.append({"text": text, "type": ftype, "created": now})
+        facts.append({"id": _alloc_id(facts), "text": text, "type": ftype, "created": now})
         existing.add(_norm(text))
         added += 1
     if len(facts) > MAX_FACTS:
         facts = facts[-MAX_FACTS:]
-    if added:
+    if added or changed:
         _save(facts)
     return added
 
@@ -89,3 +106,126 @@ def forget(substring: str) -> int:
     if removed:
         _save(kept)
     return removed
+
+
+TYPE_ORDER = ("person", "preference", "project", "pattern", "fact")
+TYPE_LABELS = {
+    "person": "Personen",
+    "preference": "Vorlieben",
+    "project": "Projekte",
+    "pattern": "Muster",
+    "fact": "Fakten",
+}
+TYPE_ICONS = {"person": "👤", "preference": "❤️", "project": "🚀", "pattern": "🔁", "fact": "·"}
+
+
+def get_fact(fact_id: int) -> dict | None:
+    for f in _load():
+        if int(f.get("id", 0)) == int(fact_id):
+            return f
+    return None
+
+
+def edit_fact(fact_id: int, new_text: str) -> bool:
+    """Replace a fact's text by id. Returns True if found and changed."""
+    new_text = new_text.strip()
+    if not new_text:
+        return False
+    facts = _load()
+    _ensure_ids(facts)
+    hit = next((f for f in facts if int(f.get("id", 0)) == int(fact_id)), None)
+    if hit is None:
+        return False
+    hit["text"] = new_text
+    hit["edited"] = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    _save(facts)
+    return True
+
+
+def delete_fact(fact_id: int) -> bool:
+    """Delete a single fact by id. Returns True if removed."""
+    facts = _load()
+    kept = [f for f in facts if int(f.get("id", 0)) != int(fact_id)]
+    if len(kept) == len(facts):
+        return False
+    _save(kept)
+    return True
+
+
+def merge_facts(ids: list[int]) -> dict | None:
+    """Merge facts into the first id (keep its text/type), delete the rest. Returns the survivor."""
+    facts = _load()
+    _ensure_ids(facts)
+    ids = [int(i) for i in ids]
+    if len(ids) < 2:
+        return None
+    survivor = next((f for f in facts if int(f["id"]) == ids[0]), None)
+    if survivor is None:
+        return None
+    drop = set(ids[1:])
+    kept = [f for f in facts if int(f["id"]) not in drop]
+    if len(kept) == len(facts):
+        return None
+    _save(kept)
+    return survivor
+
+
+def list_structured() -> dict[str, list[dict]]:
+    """Facts grouped by type, newest-first within each group, exact-duplicate texts collapsed."""
+    facts = _load()
+    if _ensure_ids(facts):
+        _save(facts)
+    seen: set[str] = set()
+    grouped: dict[str, list[dict]] = {}
+    for f in sorted(facts, key=lambda x: x.get("created", ""), reverse=True):
+        key = _norm(f["text"])
+        if key in seen:
+            continue
+        seen.add(key)
+        grouped.setdefault(f.get("type", "fact"), []).append(f)
+    return {t: grouped[t] for t in TYPE_ORDER if t in grouped}
+
+
+def find_duplicates() -> list[list[dict]]:
+    """Groups of facts whose normalized text is identical (post-dedup these are rare,
+    but near-identical wording can slip through). Each group has 2+ members."""
+    facts = _load()
+    _ensure_ids(facts)
+    by_norm: dict[str, list[dict]] = {}
+    for f in facts:
+        by_norm.setdefault(_norm(f["text"]), []).append(f)
+    return [g for g in by_norm.values() if len(g) > 1]
+
+
+def export_markdown(target_dir: Path, filename: str = "Memory_Overview.md") -> Path:
+    """Write/refresh a human-readable overview note into an Obsidian vault. Returns the path."""
+    grouped = list_structured()
+    total = sum(len(v) for v in grouped.values())
+    now = datetime.now(timezone.utc).astimezone()
+    lines = [
+        "---",
+        f'generated: {now.isoformat(timespec="seconds")}',
+        "tags: [echo/memory]",
+        "---",
+        "",
+        "# Was Echo über mich weiß",
+        "",
+        f"_Stand: {now.strftime('%Y-%m-%d %H:%M')} · {total} Fakten_",
+        "",
+        "> Bearbeiten in Telegram: `/editmemory <id> <neuer text>` · "
+        "Löschen: `/forget <id>` · Neu erzeugen: `/memorymd`",
+        "",
+    ]
+    for t, items in grouped.items():
+        lines.append(f"## {TYPE_ICONS.get(t, '·')} {TYPE_LABELS.get(t, t)}")
+        lines.append("")
+        for f in items:
+            since = (f.get("created") or "")[:10]
+            suffix = f"  <sub>seit {since}</sub>" if since else ""
+            lines.append(f"- **[{f.get('id')}]** {f['text']}{suffix}")
+        lines.append("")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    path = target_dir / filename
+    path.write_text("\n".join(lines), encoding="utf-8")
+    log.info("wrote memory overview: %s (%d facts)", path, total)
+    return path

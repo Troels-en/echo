@@ -229,7 +229,8 @@ def _build_notebooklm(briefing_text: str, out_mp3: Path) -> None:
                 language="de",
                 instructions="Kurzer, lockerer deutscher Tagesüberblick zwischen zwei Moderatoren. Sprich den Hörer mit Du an.",
             )
-            await client.artifacts.wait_for_completion(nb.id, status.task_id, timeout=600.0)
+            # Audio Overview generation is slow + queue-dependent (often >10 min on free tier).
+            await client.artifacts.wait_for_completion(nb.id, status.task_id, timeout=900.0)
             out_mp3.parent.mkdir(parents=True, exist_ok=True)
             await client.artifacts.download_audio(nb.id, str(out_mp3))
 

@@ -84,6 +84,12 @@ Then the user messages their bot `/start` on Telegram. Confirm it responds.
 - `ask` answers are ALWAYS saved via `write_answer_note`: tagged `#echo/answer`, with `importance: 1..5` and `web_research:` frontmatter. `/ask <q>` forces the ask path; plain text/voice is auto-routed.
 - Web research = `claude -p` with web tools allowed. This account's web path is the **exa MCP** (`mcp__exa__web_search_exa`); `app/llm.research_web` allowlists both builtin WebSearch/WebFetch and the exa MCP tools. Tune model/timeout via `ASK_MODEL` / `ASK_WEB_TIMEOUT`.
 
+## Podcast backends (`/podcast`, `app/podcast.py`)
+Selected by `PODCAST_BACKEND` (auto|gemini|notebooklm|elevenlabs|say):
+- **gemini** — Gemini multi-speaker TTS (`GOOGLE_API_KEY`), two voices in one call. Stable, primary.
+- **notebooklm** — real NotebookLM Audio Overview via `notebooklm-py` (cookie auth: `notebooklm login --browser-cookies chrome`). Unofficial, falls back to script+TTS on failure.
+- **elevenlabs / say** — per-segment fallbacks.
+- **auto** = gemini → elevenlabs → say by what's configured, with runtime fallback.
+
 ## Roadmap (Phase 2 — not built yet)
 - **Weekly cleanup job:** `claude -p` reviews `#echo/answer` notes, re-sorts into best vault, dedups, prunes low-`importance`. (Importance frontmatter exists to support this.)
-- **NotebookLM podcast:** turn the daily/news briefing into an audio podcast.

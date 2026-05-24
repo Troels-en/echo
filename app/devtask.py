@@ -62,6 +62,7 @@ REQUEST:
 
 def run_devtask(repo: Path, task: str, timeout: int = 1800) -> dict:
     """Create a branch, run the claude agent, commit. Returns {branch, report, changed, error}."""
+    orig = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() or "main"
     branch = f"echo/dev-{datetime.now():%Y%m%d-%H%M%S}"
     co = _git(repo, "checkout", "-b", branch)
     if co.returncode != 0:
@@ -87,4 +88,9 @@ def run_devtask(repo: Path, task: str, timeout: int = 1800) -> dict:
     committed = commit.returncode == 0
     changed = _git(repo, "diff", "--stat", "HEAD~1", "HEAD").stdout.strip() if committed else "(keine Änderungen committet)"
 
-    return {"branch": branch, "report": report[-2500:], "changed": changed, "committed": committed, "error": ""}
+    # Return the repo to where it was — the work stays on `branch`, retrievable for review.
+    # Critical when the target is a live repo (e.g. echo_vault itself).
+    _git(repo, "checkout", orig)
+
+    return {"branch": branch, "base": orig, "report": report[-2500:],
+            "changed": changed, "committed": committed, "error": ""}

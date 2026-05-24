@@ -23,7 +23,7 @@ from .transcribe import transcribe, TranscribeError
 from .vault import classify, write_note, write_answer_note, vault_todoist_config, find_related
 from .llm import LLMError
 from . import todoist as td
-from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod, tts as tts_mod, shortterm as shortterm_mod, secondbrain as secondbrain_mod, jobs as jobs_mod, proactive as proactive_mod, devtask as devtask_mod, notionsync as notionsync_mod, agenttask as agenttask_mod
+from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod, tts as tts_mod, shortterm as shortterm_mod, secondbrain as secondbrain_mod, jobs as jobs_mod, proactive as proactive_mod, devtask as devtask_mod, notionsync as notionsync_mod, agenttask as agenttask_mod, transcript as transcript_mod
 
 log = logging.getLogger(__name__)
 
@@ -222,6 +222,7 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         intent = classification.get("intent", "note")
         log.info("voice intent: %s", intent)
         _log_event(intent, classification, transcript, "voice")
+        transcript_mod.record("voice", transcript, classification)
         shortterm_mod.add("user", transcript)
         if intent == "query":
             await progress.delete()
@@ -893,6 +894,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     intent = classification.get("intent", "note")
     log.info("text intent: %s for %r", intent, text[:80])
     _log_event(intent, classification, text, "text")
+    transcript_mod.record("text", text, classification)
     shortterm_mod.add("user", text)
 
     if intent == "query":

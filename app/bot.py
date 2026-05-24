@@ -151,46 +151,6 @@ async def cmd_id(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"User ID: `{user.id}`", parse_mode="Markdown")
 
 
-COMMANDS_HELP = """🤖 *Echo — Befehle*
-
-*Allgemein*
-• `/start` — Bot starten, Chat verknüpfen
-• `/help` — Diese Befehlsübersicht
-• `/id` — Deine User-ID
-• `/ask <frage>` — Allgemeine Frage / Web-Recherche
-• `/voice on|off` — Sprachantworten umschalten
-
-*Briefing & News*
-• `/briefing` — Daily-Briefing jetzt
-• `/briefingtime <HH:MM>` — Briefing-Uhrzeit setzen
-• `/news` — News-Briefing
-• `/mail` — Gmail-Triage
-• `/mailme [thema]` — Briefing/Recherche per Mail an dich
-• `/podcast` — Audio-Briefing erzeugen
-
-*Notizen & Dokumente*
-• `/inbox` — Inbox-Notizen reviewen
-• `/finddoc <begriff>` — Dokument suchen (Disk + Mail)
-• `/indexdocs` — Dokument-Index neu bauen
-• `/draft` — Anschreiben-Entwurf in deinem Stil
-• `/synthesize` — Wochen-Synthese ins Wiki
-• `/overview` — Obsidian-Dashboard aktualisieren
-• `/stats` — Nutzungs-Stats / XP
-
-*Memory*
-• `/memory` — Gespeicherte Fakten anzeigen
-• `/editmemory <id> <text>` — Fakt bearbeiten
-• `/mergememory` — Fakten zusammenführen
-• `/forget <id|stichwort>` — Fakt löschen
-• `/memorymd` — MEMORY.md anzeigen
-
-_Tipp: meist reicht normales Reden — Befehle sind optional._"""
-
-
-async def cmd_help(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(COMMANDS_HELP, parse_mode="Markdown")
-
-
 async def _create_tasks(classification: dict) -> list[td.Task]:
     """Create one Todoist task per extracted action. Returns created tasks."""
     task_list = classification.get("tasks") or []
@@ -1707,7 +1667,6 @@ def main() -> None:
         log.warning("SecondBrain wiki index at startup failed: %s", e)
 
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("ask", cmd_ask))
     app.add_handler(CommandHandler("briefing", cmd_briefing))

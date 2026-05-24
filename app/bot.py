@@ -23,7 +23,7 @@ from .transcribe import transcribe, TranscribeError
 from .vault import classify, write_note, write_answer_note, vault_todoist_config, find_related
 from .llm import LLMError
 from . import todoist as td
-from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod, tts as tts_mod, shortterm as shortterm_mod, secondbrain as secondbrain_mod, jobs as jobs_mod
+from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod, tts as tts_mod, shortterm as shortterm_mod, secondbrain as secondbrain_mod, jobs as jobs_mod, proactive as proactive_mod
 
 log = logging.getLogger(__name__)
 
@@ -687,6 +687,21 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not text:
         return
 
+    # Evening habit check-in capture: if Echo just asked (within 4h), log this reply to the vault.
+    import time as _t
+    ck_ts = state_mod.load().get("pending_habit_checkin_ts")
+    if ck_ts and (_t.time() - ck_ts) < 4 * 3600 and not text.startswith("/"):
+        state_mod.set_key("pending_habit_checkin_ts", 0)
+        try:
+            path = await asyncio.to_thread(proactive_mod.log_checkin, text)
+            shortterm_mod.add("user", text)
+            shortterm_mod.add("echo", "[Habit-Check-in geloggt]")
+            await msg.reply_text(f"✅ Im Habits-Vault eingetragen ({path.name}). Gut gemacht.")
+        except Exception as e:
+            log.exception("checkin log failed")
+            await msg.reply_text(f"❌ Konnte Check-in nicht loggen: {e}")
+        return
+
     # Single LLM call: intent + (if note) classification, with recent-conversation context
     history = shortterm_mod.recent_text()
     classification = await asyncio.to_thread(classify, text, cfg, history)
@@ -934,6 +949,30 @@ async def _synthesis_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             )
     except Exception as e:
         log.exception("weekly synthesis failed: %s", e)
+
+
+async def _morning_nudge_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    st = state_mod.load()
+    chat = st.get("chat_id")
+    if not st.get("proactive_enabled", True) or not chat:
+        return
+    try:
+        await ctx.bot.send_message(chat, proactive_mod.morning_text(), parse_mode="Markdown")
+    except Exception as e:
+        log.exception("morning nudge failed: %s", e)
+
+
+async def _evening_nudge_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    st = state_mod.load()
+    chat = st.get("chat_id")
+    if not st.get("proactive_enabled", True) or not chat:
+        return
+    try:
+        import time as _t
+        state_mod.set_key("pending_habit_checkin_ts", _t.time())
+        await ctx.bot.send_message(chat, proactive_mod.evening_text(), parse_mode="Markdown")
+    except Exception as e:
+        log.exception("evening nudge failed: %s", e)
 
 
 def _pending_move(ctx) -> dict:
@@ -1518,6 +1557,12 @@ def main() -> None:
         time=_dtime(hour=20, minute=0, tzinfo=_ZoneInfo("Europe/Berlin")),
         name="weekly_synthesis",
     )
+    # Proactive habit nudges (Habits_Vault-grounded). Toggle via state "proactive_enabled".
+    _tz = _ZoneInfo("Europe/Berlin")
+    app.job_queue.run_daily(_morning_nudge_job, time=_dtime(hour=8, minute=0, tzinfo=_tz),
+                            name="morning_nudge")
+    app.job_queue.run_daily(_evening_nudge_job, time=_dtime(hour=21, minute=30, tzinfo=_tz),
+                            name="evening_nudge")
 
     log.info("Echo bot starting...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

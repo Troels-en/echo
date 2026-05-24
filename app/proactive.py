@@ -52,9 +52,14 @@ def evening_text() -> str:
     return (
         "🌙 *Tagesabschluss.*\n"
         f"Minimum: {evening}\n\n"
-        "Wie lief dein Tag? Kurz: Schlaf-Onset (1=sofort…5=>45min), "
-        "Bewegung, Phone-Disziplin, Journaling/Meditation gemacht? "
-        "Schreib einfach frei zurück — ich logge es in deinen Habits-Vault."
+        "Wie lief dein Tag? Kurz durchgehen:\n"
+        "1) Schlaf-Onset (1=sofort…5=>45min)\n"
+        "2) Morgen-Energie (1–10)\n"
+        "3) Fokus am Tagesende (1–10)\n"
+        "4) Handy in der Küche? (J/N)\n"
+        "5) Koffein-Cutoff 14:00 gehalten? (J/N)\n"
+        "6) Mittags gelaufen? (J/N)\n\n"
+        "Schreib einfach frei zurück (z.B. „2, 7, 6, J, J, N") — ich logge es in deinen Habits-Vault."
     )
 
 

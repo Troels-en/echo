@@ -23,7 +23,7 @@ from .transcribe import transcribe, TranscribeError
 from .vault import classify, write_note, write_answer_note, vault_todoist_config, find_related
 from .llm import LLMError
 from . import todoist as td
-from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod, tts as tts_mod, shortterm as shortterm_mod
+from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod, tts as tts_mod, shortterm as shortterm_mod, secondbrain as secondbrain_mod
 
 log = logging.getLogger(__name__)
 
@@ -845,6 +845,52 @@ async def _mail_research_bg(topic: str, cfg: Config, msg) -> None:
         await msg.reply_text(_mail_scope_hint(e))
 
 
+async def cmd_synthesize(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Weekly synthesis: stage recent notes → ingest into SecondBrain wiki → re-index into RAG."""
+    cfg: Config = ctx.application.bot_data["cfg"]
+    if not _is_allowed(update, cfg):
+        return
+    await update.message.reply_text(
+        "🧠 Wochen-Synthese läuft im Hintergrund: Notizen → SecondBrain-Wiki → RAG re-indexieren.\n"
+        "_Dauert ein paar Minuten, ich melde mich._"
+    )
+    asyncio.create_task(_synthesize_bg(cfg, update.message))
+
+
+async def _synthesize_bg(cfg: Config, msg) -> None:
+    try:
+        res = await asyncio.to_thread(secondbrain_mod.synthesize_week, cfg)
+        out = (f"🧠 Synthese fertig.\n"
+               f"📥 {res['staged']} neue Notizen gestaged · 📚 {res['wiki_indexed']} Wiki-Seiten re-indexiert.")
+        report = (res.get("ingest_report") or "").strip()
+        if report:
+            out += "\n\n" + report[:1500]
+        await _safe_reply(msg, out)
+    except Exception as e:
+        log.exception("synthesize failed")
+        await msg.reply_text(f"❌ Synthese-Fehler: {e}")
+
+
+async def _synthesis_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Scheduled weekly (guards to Sundays) — runs the synthesis + notifies the chat."""
+    from datetime import datetime
+    if datetime.now().weekday() != 6:  # 6 = Sunday
+        return
+    cfg: Config = ctx.application.bot_data["cfg"]
+    st = state_mod.load()
+    chat = st.get("chat_id")
+    try:
+        res = await asyncio.to_thread(secondbrain_mod.synthesize_week, cfg)
+        if chat:
+            await ctx.bot.send_message(
+                chat,
+                f"🧠 Wöchentliche Synthese: {res['staged']} Notizen → Wiki, "
+                f"{res['wiki_indexed']} Seiten re-indexiert.",
+            )
+    except Exception as e:
+        log.exception("weekly synthesis failed: %s", e)
+
+
 def _pending_move(ctx) -> dict:
     return ctx.application.bot_data.setdefault("pending_move", {})
 
@@ -1376,6 +1422,12 @@ def main() -> None:
     # Ensure vector store schema exists before serving
     store.init_schema(cfg.data_dir / "store.db")
     events_mod.init_schema()
+    # Bridge: index the curated SecondBrain wiki into Echo's RAG (high-signal pages)
+    try:
+        n = secondbrain_mod.index_wiki(cfg, reindex=True)
+        log.info("indexed %d SecondBrain wiki pages into RAG", n)
+    except Exception as e:
+        log.warning("SecondBrain wiki index at startup failed: %s", e)
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("id", cmd_id))
@@ -1397,6 +1449,7 @@ def main() -> None:
     app.add_handler(CommandHandler("overview", cmd_overview))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("mailme", cmd_mailme))
+    app.add_handler(CommandHandler("synthesize", cmd_synthesize))
     app.add_handler(CommandHandler("voice", cmd_voice))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
@@ -1408,6 +1461,15 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_completion_callback, pattern=r"^(close:|closeall:|cancel$)"))
 
     _reschedule_briefing(app)
+
+    # Weekly SecondBrain synthesis — fires daily 20:00, the job itself runs only on Sundays.
+    from datetime import time as _dtime
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    app.job_queue.run_daily(
+        _synthesis_job,
+        time=_dtime(hour=20, minute=0, tzinfo=_ZoneInfo("Europe/Berlin")),
+        name="weekly_synthesis",
+    )
 
     log.info("Echo bot starting...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

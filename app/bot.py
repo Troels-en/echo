@@ -80,6 +80,19 @@ async def _safe_reply(msg, text: str) -> None:
             raise
 
 
+async def _safe_reply_kb(msg, text: str, kb) -> None:
+    """reply_text with an inline keyboard; fall back to plain text (keeping buttons) if
+    Markdown entity parsing fails — otherwise a stray * / _ / ( in LLM text kills the message."""
+    from telegram.error import BadRequest
+    try:
+        await msg.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+    except BadRequest as e:
+        if "entit" in str(e).lower() or "parse" in str(e).lower():
+            await msg.reply_text(text, reply_markup=kb)
+        else:
+            raise
+
+
 async def cmd_start(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     chat_id = update.effective_chat.id if update.effective_chat else None
@@ -708,10 +721,11 @@ async def _present_devtask(classification: dict, cfg: Config, msg, ctx) -> None:
         InlineKeyboardButton("✅ Claude Code starten", callback_data=f"dev:{token}"),
         InlineKeyboardButton("✗ Abbrechen", callback_data="cancel"),
     ]])
-    await msg.reply_text(
+    await _safe_reply_kb(
+        msg,
         f"🛠️ *Dev-Task*\n📁 `{repo.name}` — neuer Branch, kein Push (reviewbar)\n📝 {task}\n\n"
         "Claude Code starten?",
-        parse_mode="Markdown", reply_markup=kb)
+        kb)
 
 
 async def handle_dev_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -765,9 +779,10 @@ async def _present_agenttask(classification: dict, cfg: Config, msg, ctx) -> Non
         InlineKeyboardButton("✅ Ausführen", callback_data=f"agt:{token}"),
         InlineKeyboardButton("✗ Abbrechen", callback_data="cancel"),
     ]])
-    await msg.reply_text(
+    await _safe_reply_kb(
+        msg,
         f"🤖 *Aufgabe ausführen* (Notion + Vaults, additiv/non-destruktiv)\n📝 {task}\n\nStarten?",
-        parse_mode="Markdown", reply_markup=kb)
+        kb)
 
 
 async def handle_agenttask_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

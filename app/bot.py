@@ -23,7 +23,7 @@ from .transcribe import transcribe, TranscribeError
 from .vault import classify, write_note, write_answer_note, vault_todoist_config, find_related
 from .llm import LLMError
 from . import todoist as td
-from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod, tts as tts_mod, shortterm as shortterm_mod, secondbrain as secondbrain_mod
+from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod, tts as tts_mod, shortterm as shortterm_mod, secondbrain as secondbrain_mod, jobs as jobs_mod
 
 log = logging.getLogger(__name__)
 
@@ -247,6 +247,10 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await progress.delete()
             await _answer_ask(transcript, cfg, msg, history)
             return
+        if intent == "status":
+            await progress.delete()
+            await msg.reply_text(jobs_mod.status_text())
+            return
         if intent in _ACTION_INTENTS:
             await progress.delete()
             await _route_action(intent, transcript, update, ctx)
@@ -338,12 +342,12 @@ async def _answer_ask(question: str, cfg: Config, msg, history: str = "") -> Non
         return
 
     if ask_mod.needs_web(triage_data):
-        await _safe_edit(
-            progress,
-            "🔍 Tiefen-Recherche läuft im Hintergrund — ich melde mich in ~2-3 Min mit der Antwort.\n"
-            "_Du kannst in der Zwischenzeit weiter Fragen stellen._",
-        )
-        asyncio.create_task(_finish_research_bg(question, cfg, history, triage_data, msg))
+        ack = ("🔍 Tiefen-Recherche läuft im Hintergrund — ich melde mich in ~2-3 Min mit der Antwort. "
+               "Du kannst in der Zwischenzeit weiter Fragen stellen.")
+        await _safe_edit(progress, ack)
+        shortterm_mod.add("echo", f"[Hintergrund-Recherche gestartet zu: {question[:80]}] {ack}")
+        jid = jobs_mod.start("research", question[:60])
+        asyncio.create_task(_finish_research_bg(question, cfg, history, triage_data, msg, jid))
         return
 
     answer = (triage_data.get("answer") or "").strip() or "Keine Antwort."
@@ -352,7 +356,7 @@ async def _answer_ask(question: str, cfg: Config, msg, history: str = "") -> Non
 
 
 async def _finish_research_bg(question: str, cfg: Config, history: str,
-                              triage_data: dict, msg) -> None:
+                              triage_data: dict, msg, jid: int | None = None) -> None:
     """Run the slow web research off the handler, then push the answer as a new message."""
     try:
         answer = await asyncio.to_thread(ask_mod.run_research, question, cfg, history)
@@ -360,6 +364,9 @@ async def _finish_research_bg(question: str, cfg: Config, history: str,
         log.exception("background research failed")
         await msg.reply_text(f"❌ Recherche fehlgeschlagen: {e}")
         return
+    finally:
+        if jid is not None:
+            jobs_mod.finish(jid)
     result = ask_mod.finalize(triage_data, answer, True, cfg, question)
     await _deliver_ask(result, question, cfg, msg, progress=None)
 
@@ -706,6 +713,9 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if intent == "ask":
         await _answer_ask(text, cfg, msg, history)
         return
+    if intent == "status":
+        await msg.reply_text(jobs_mod.status_text())
+        return
     if intent in _ACTION_INTENTS:
         await _route_action(intent, text, update, ctx)
         return
@@ -855,13 +865,14 @@ async def cmd_mailme(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await progress.edit_text(_mail_scope_hint(e))
         return
 
-    await update.message.reply_text(
-        f"🔍 Recherchiere '{arg}' im Hintergrund — maile dir das Ergebnis in ~2-3 Min."
-    )
-    asyncio.create_task(_mail_research_bg(arg, cfg, update.message))
+    ack = f"🔍 Recherchiere '{arg}' im Hintergrund — maile dir das Ergebnis in ~2-3 Min."
+    await update.message.reply_text(ack)
+    shortterm_mod.add("echo", ack)
+    jid = jobs_mod.start("mail-research", arg[:60])
+    asyncio.create_task(_mail_research_bg(arg, cfg, update.message, jid))
 
 
-async def _mail_research_bg(topic: str, cfg: Config, msg) -> None:
+async def _mail_research_bg(topic: str, cfg: Config, msg, jid: int | None = None) -> None:
     """Deep web research off-handler, then email the result to the user."""
     try:
         answer = await asyncio.to_thread(ask_mod.run_research, topic, cfg, "")
@@ -870,6 +881,9 @@ async def _mail_research_bg(topic: str, cfg: Config, msg) -> None:
     except Exception as e:
         log.exception("mailme research failed")
         await msg.reply_text(_mail_scope_hint(e))
+    finally:
+        if jid is not None:
+            jobs_mod.finish(jid)
 
 
 async def cmd_synthesize(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -877,14 +891,15 @@ async def cmd_synthesize(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     cfg: Config = ctx.application.bot_data["cfg"]
     if not _is_allowed(update, cfg):
         return
-    await update.message.reply_text(
-        "🧠 Wochen-Synthese läuft im Hintergrund: Notizen → SecondBrain-Wiki → RAG re-indexieren.\n"
-        "_Dauert ein paar Minuten, ich melde mich._"
-    )
-    asyncio.create_task(_synthesize_bg(cfg, update.message))
+    ack = ("🧠 Wochen-Synthese läuft im Hintergrund: Notizen → SecondBrain-Wiki → RAG re-indexieren. "
+           "Dauert ein paar Minuten, ich melde mich.")
+    await update.message.reply_text(ack, parse_mode="Markdown")
+    shortterm_mod.add("echo", ack)
+    jid = jobs_mod.start("synthesize", "Wochen-Synthese")
+    asyncio.create_task(_synthesize_bg(cfg, update.message, jid))
 
 
-async def _synthesize_bg(cfg: Config, msg) -> None:
+async def _synthesize_bg(cfg: Config, msg, jid: int | None = None) -> None:
     try:
         res = await asyncio.to_thread(secondbrain_mod.synthesize_week, cfg)
         out = (f"🧠 Synthese fertig.\n"
@@ -896,6 +911,9 @@ async def _synthesize_bg(cfg: Config, msg) -> None:
     except Exception as e:
         log.exception("synthesize failed")
         await msg.reply_text(f"❌ Synthese-Fehler: {e}")
+    finally:
+        if jid is not None:
+            jobs_mod.finish(jid)
 
 
 async def _synthesis_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1370,6 +1388,7 @@ async def cmd_podcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat:
         state_mod.set_key("chat_id", update.effective_chat.id)
     progress = await update.message.reply_text("🎙️ Baue Podcast (Briefing → Skript → Audio)...")
+    jid = jobs_mod.start("podcast", "Briefing-Podcast")
     try:
         result = await asyncio.to_thread(podcast_mod.build_podcast, cfg)
         await progress.edit_text(
@@ -1385,6 +1404,8 @@ async def cmd_podcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         log.exception("podcast failed")
         await progress.edit_text(f"❌ Podcast-Fehler: {e}")
+    finally:
+        jobs_mod.finish(jid)
 
 
 async def cmd_overview(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

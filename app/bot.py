@@ -799,6 +799,52 @@ async def cmd_news(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _send_news(cfg, update.message)
 
 
+def _mail_scope_hint(e: Exception) -> str:
+    s = str(e).lower()
+    if "insufficient" in s or "scope" in s or "403" in s:
+        return ("📧 Mail-Versand noch nicht autorisiert. Einmalig im Terminal:\n"
+                "`.venv/bin/python scripts/google_auth.py` (neu einloggen, Senden erlauben).")
+    return f"❌ Mail-Fehler: {e}"
+
+
+async def cmd_mailme(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/mailme` → briefing per Mail. `/mailme <thema>` → recherchiert + mailt das Ergebnis."""
+    cfg: Config = ctx.application.bot_data["cfg"]
+    if not _is_allowed(update, cfg):
+        return
+    if not gcal.is_configured():
+        await update.message.reply_text("📧 Gmail nicht verbunden (erst Google-OAuth).")
+        return
+    arg = " ".join(ctx.args).strip() if ctx.args else ""
+
+    if not arg or arg.lower() in ("briefing", "news", "daily"):
+        progress = await update.message.reply_text("📧 Baue Briefing und maile es dir...")
+        try:
+            text = await asyncio.to_thread(briefing_mod.build_briefing, cfg)
+            await asyncio.to_thread(gcal.send_self, "Echo — Dein Briefing", text)
+            await progress.edit_text("📧 Briefing an dein Gmail geschickt.")
+        except Exception as e:
+            log.exception("mailme briefing failed")
+            await progress.edit_text(_mail_scope_hint(e))
+        return
+
+    await update.message.reply_text(
+        f"🔍 Recherchiere '{arg}' im Hintergrund — maile dir das Ergebnis in ~2-3 Min."
+    )
+    asyncio.create_task(_mail_research_bg(arg, cfg, update.message))
+
+
+async def _mail_research_bg(topic: str, cfg: Config, msg) -> None:
+    """Deep web research off-handler, then email the result to the user."""
+    try:
+        answer = await asyncio.to_thread(ask_mod.run_research, topic, cfg, "")
+        await asyncio.to_thread(gcal.send_self, f"Echo — Recherche: {topic}", answer)
+        await msg.reply_text(f"📧 Recherche zu '{topic}' an dein Gmail geschickt.")
+    except Exception as e:
+        log.exception("mailme research failed")
+        await msg.reply_text(_mail_scope_hint(e))
+
+
 def _pending_move(ctx) -> dict:
     return ctx.application.bot_data.setdefault("pending_move", {})
 
@@ -1350,6 +1396,7 @@ def main() -> None:
     app.add_handler(CommandHandler("podcast", cmd_podcast))
     app.add_handler(CommandHandler("overview", cmd_overview))
     app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("mailme", cmd_mailme))
     app.add_handler(CommandHandler("voice", cmd_voice))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

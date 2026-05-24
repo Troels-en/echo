@@ -19,6 +19,7 @@ CREDS = ROOT / "secrets" / "google_credentials.json"
 SCOPES = [
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
 ]
 TZ = ZoneInfo("Europe/Berlin")
 
@@ -50,6 +51,23 @@ def _calendar():
 
 def _gmail():
     return build("gmail", "v1", credentials=_creds(), cache_discovery=False)
+
+
+def send_self(subject: str, body: str, html: bool = False) -> None:
+    """Email the authenticated user (themselves). Needs the gmail.send scope —
+    if missing, re-run scripts/google_auth.py to re-consent."""
+    import base64
+    from email.mime.text import MIMEText
+
+    svc = _gmail()
+    addr = svc.users().getProfile(userId="me").execute()["emailAddress"]
+    mime = MIMEText(body, "html" if html else "plain", "utf-8")
+    mime["to"] = addr
+    mime["from"] = addr
+    mime["subject"] = subject
+    raw = base64.urlsafe_b64encode(mime.as_bytes()).decode()
+    svc.users().messages().send(userId="me", body={"raw": raw}).execute()
+    log.info("gmail sent to self: %s", subject)
 
 
 def _header(payload: dict, name: str) -> str:

@@ -230,10 +230,12 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if intent == "complete":
             await progress.delete()
             await _present_completion_candidates(transcript, cfg, msg)
+            await _maybe_answer_followup(classification, cfg, msg, history)
             return
         if intent == "event":
             await progress.delete()
             await _present_event(classification, cfg, msg, ctx)
+            await _maybe_answer_followup(classification, cfg, msg, history)
             return
         if intent == "mail":
             await progress.delete()
@@ -287,6 +289,7 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             parse_mode="Markdown",
             reply_markup=_tasks_keyboard(tasks),
         )
+        await _maybe_answer_followup(classification, cfg, msg, history)
     except (TranscribeError, LLMError) as e:
         log.exception("voice handler failed")
         await progress.edit_text(f"❌ Fehler: {e}")
@@ -745,6 +748,13 @@ async def _route_action(intent: str, text: str, update: Update, ctx: ContextType
     await handler(update, ctx)
 
 
+async def _maybe_answer_followup(classification: dict, cfg: Config, msg, history: str = "") -> None:
+    """Multi-intent: if the message also held a question on top of a capture/action, answer it."""
+    q = (classification.get("also_question") or "").strip()
+    if q:
+        await _answer_ask(q, cfg, msg, history)
+
+
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Plain-text message → intent classifier → route."""
     cfg: Config = ctx.application.bot_data["cfg"]
@@ -783,9 +793,11 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if intent == "complete":
         await _present_completion_candidates(text, cfg, msg)
+        await _maybe_answer_followup(classification, cfg, msg, history)
         return
     if intent == "event":
         await _present_event(classification, cfg, msg, ctx)
+        await _maybe_answer_followup(classification, cfg, msg, history)
         return
     if intent == "mail":
         await _handle_mail(cfg, msg, ctx, text, classification)
@@ -806,6 +818,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await _route_action(intent, text, update, ctx)
         return
     await _ingest_text(text, cfg, msg, classification=classification)
+    await _maybe_answer_followup(classification, cfg, msg, history)
 
 
 def _tasks_keyboard(tasks: list) -> InlineKeyboardMarkup | None:

@@ -77,6 +77,7 @@ Return ONLY a JSON object, no prose:
   "intent": "query" | "complete" | "event" | "mail" | "news" | "ask" | "podcast" | "overview" | "stats" | "draft" | "finddoc" | "synthesize" | "mailme" | "status" | "devtask" | "note",
   "dev_repo": "<if intent=devtask: the project/repo name the user named, else empty>",
   "dev_task": "<if intent=devtask: the concrete coding task in one clear sentence, else empty>",
+  "also_question": "<if the message ALSO contains a separate question on top of a note/task/event/complete (e.g. 'priorisierst du Tasks? Übrigens ich muss mich bewerben'), put that question here so it gets answered too; else empty>",
   "intent_confidence": <float 0..1>,
   "vault": "<vault name from list, or empty if intent != note>",
   "confidence": <float 0..1>,
@@ -107,7 +108,8 @@ Return ONLY a JSON object, no prose:
 }}
 
 Rules:
-- Default intent to "note" if unsure. "query" only if asking for info FROM the user's OWN notes. "ask" if it's a general/world/research question not about their notes. "complete" only if reporting DONE work. "event" only if a specific date/time for an appointment is given — resolve relative dates ("morgen", "Donnerstag") against NOW into absolute ISO.
+- Default intent to "note" if unsure. "query" only if asking for info FROM the user's OWN notes. "ask" if it's a general/world/research question not about their notes. "complete" only if reporting DONE work.
+- MULTI-INTENT: a message can hold BOTH a capture/action (note/task/event/complete) AND a separate question. Pick the capture/action as the primary "intent", AND put the question into "also_question" so it gets answered too. Don't drop the question. If the message is ONLY a question, use "ask"/"query" as intent and leave "also_question" empty. "event" only if a specific date/time for an appointment is given — resolve relative dates ("morgen", "Donnerstag") against NOW into absolute ISO.
 - CRITICAL — SPLIT TASKS: if the input mentions multiple distinct actions, output ONE task object PER action. "Ich muss X und Y" → two tasks. Never merge two actions into one task.
 - A task is a concrete action to DO. Ideas, reflections, observations → NO task (empty "tasks" array).
 - Choose labels PER TASK by meaning. A personal job application = "Karriere", NOT "Career-Buddy". Career-Buddy label is ONLY for the user's Career-Buddy product itself.

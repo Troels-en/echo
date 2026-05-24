@@ -52,6 +52,19 @@ def _log_event(intent: str, classification: dict, text: str, source: str) -> Non
     events_mod.log_event(intent=intent, vault=vault, input_len=len(text or ""), source=source)
 
 
+async def _safe_edit(message, text: str) -> None:
+    """Edit a message as Markdown; if Telegram rejects the entities (unbalanced */_/`/[ in
+    LLM output), resend as plain text so the user still gets the answer."""
+    from telegram.error import BadRequest
+    try:
+        await message.edit_text(text, parse_mode="Markdown")
+    except BadRequest as e:
+        if "entit" in str(e).lower() or "parse" in str(e).lower():
+            await message.edit_text(text)
+        else:
+            raise
+
+
 async def cmd_start(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     chat_id = update.effective_chat.id if update.effective_chat else None
@@ -71,7 +84,7 @@ async def cmd_briefing(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     progress = await update.message.reply_text("📋 Baue Briefing...")
     try:
         text = await asyncio.to_thread(briefing_mod.build_briefing, cfg)
-        await progress.edit_text(text, parse_mode="Markdown")
+        await _safe_edit(progress, text)
         await _maybe_send_voice(text, cfg, update.message)
     except Exception as e:
         log.exception("briefing failed")
@@ -288,7 +301,7 @@ async def _answer_query(question: str, cfg: Config, msg) -> None:
             out += "\n\n*Quellen:*\n" + "\n".join(src_lines)
         if len(out) > 4000:
             out = out[:3900] + "\n\n_(gekürzt)_"
-        await progress.edit_text(out, parse_mode="Markdown")
+        await _safe_edit(progress, out)
     except Exception as e:
         log.exception("ask failed")
         await progress.edit_text(f"❌ Fehler: {e}")
@@ -328,7 +341,7 @@ async def _answer_ask(question: str, cfg: Config, msg) -> None:
         out = answer + footer
         if len(out) > 4000:
             out = answer[: 3900 - len(footer)] + "\n\n_(gekürzt)_" + footer
-        await progress.edit_text(out, parse_mode="Markdown")
+        await _safe_edit(progress, out)
         await _maybe_send_voice(answer, cfg, msg)
     except Exception as e:
         log.exception("ask (general) failed")

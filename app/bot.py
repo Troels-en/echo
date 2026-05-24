@@ -23,7 +23,7 @@ from .transcribe import transcribe, TranscribeError
 from .vault import classify, write_note, write_answer_note, vault_todoist_config, find_related
 from .llm import LLMError
 from . import todoist as td
-from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod, tts as tts_mod, shortterm as shortterm_mod, secondbrain as secondbrain_mod, jobs as jobs_mod, proactive as proactive_mod, devtask as devtask_mod
+from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod, tts as tts_mod, shortterm as shortterm_mod, secondbrain as secondbrain_mod, jobs as jobs_mod, proactive as proactive_mod, devtask as devtask_mod, notionsync as notionsync_mod
 
 log = logging.getLogger(__name__)
 
@@ -858,7 +858,10 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             path = await asyncio.to_thread(proactive_mod.log_checkin, text)
             shortterm_mod.add("user", text)
             shortterm_mod.add("echo", "[Habit-Check-in geloggt]")
-            await msg.reply_text(f"✅ Im Habits-Vault eingetragen ({path.name}). Gut gemacht.")
+            mirrored = await asyncio.to_thread(
+                notionsync_mod.mirror_habit_log, path.stem.replace("-checkin", ""), text)
+            tail = " (auch in Notion gespiegelt)" if mirrored else ""
+            await msg.reply_text(f"✅ Im Habits-Vault eingetragen ({path.name}){tail}. Gut gemacht.")
         except Exception as e:
             log.exception("checkin log failed")
             await msg.reply_text(f"❌ Konnte Check-in nicht loggen: {e}")

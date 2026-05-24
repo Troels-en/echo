@@ -23,7 +23,7 @@ from .transcribe import transcribe, TranscribeError
 from .vault import classify, write_note, write_answer_note, vault_todoist_config, find_related
 from .llm import LLMError
 from . import todoist as td
-from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod, tts as tts_mod, shortterm as shortterm_mod, secondbrain as secondbrain_mod, jobs as jobs_mod, proactive as proactive_mod
+from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod, tts as tts_mod, shortterm as shortterm_mod, secondbrain as secondbrain_mod, jobs as jobs_mod, proactive as proactive_mod, devtask as devtask_mod
 
 log = logging.getLogger(__name__)
 
@@ -250,6 +250,10 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if intent == "status":
             await progress.delete()
             await msg.reply_text(jobs_mod.status_text())
+            return
+        if intent == "devtask":
+            await progress.delete()
+            await _present_devtask(classification, cfg, msg, ctx)
             return
         if intent in _ACTION_INTENTS:
             await progress.delete()
@@ -657,6 +661,70 @@ async def cmd_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _answer_ask(question, cfg, update.message)
 
 
+def _pending_devtasks(ctx) -> dict:
+    return ctx.application.bot_data.setdefault("pending_devtasks", {})
+
+
+async def _present_devtask(classification: dict, cfg: Config, msg, ctx) -> None:
+    """Confirmation gate before Echo triggers a Claude Code agent on a repo."""
+    repo_hint = (classification.get("dev_repo") or "").strip()
+    task = (classification.get("dev_task") or "").strip()
+    if not task:
+        await msg.reply_text("🛠️ Was genau soll Claude Code umsetzen — und in welchem Projekt?")
+        return
+    repo = await asyncio.to_thread(devtask_mod.resolve_repo, repo_hint)
+    if not repo:
+        await msg.reply_text(
+            f"🛠️ Projekt '{repo_hint}' nicht als Git-Repo unter `{devtask_mod.DEV_ROOT}` gefunden. "
+            "Welches Projekt genau?", parse_mode="Markdown")
+        return
+    token = uuid4().hex[:8]
+    _pending_devtasks(ctx)[token] = {"repo": str(repo), "task": task}
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Claude Code starten", callback_data=f"dev:{token}"),
+        InlineKeyboardButton("✗ Abbrechen", callback_data="cancel"),
+    ]])
+    await msg.reply_text(
+        f"🛠️ *Dev-Task*\n📁 `{repo.name}` — neuer Branch, kein Push (reviewbar)\n📝 {task}\n\n"
+        "Claude Code starten?",
+        parse_mode="Markdown", reply_markup=kb)
+
+
+async def handle_dev_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    token = q.data.split(":", 1)[1]
+    pend = _pending_devtasks(ctx).pop(token, None)
+    if not pend:
+        await q.edit_message_text("Dev-Task abgelaufen.")
+        return
+    repo = Path(pend["repo"])
+    await q.edit_message_text(
+        f"🛠️ Claude Code läuft in `{repo.name}` im Hintergrund — ich melde mich. "
+        "_Du kannst in der Zwischenzeit weiter fragen._", parse_mode="Markdown")
+    jid = jobs_mod.start("devtask", repo.name)
+    asyncio.create_task(_run_devtask_bg(repo, pend["task"], q.message, jid))
+
+
+async def _run_devtask_bg(repo: Path, task: str, msg, jid: int | None = None) -> None:
+    try:
+        res = await asyncio.to_thread(devtask_mod.run_devtask, repo, task)
+        if res.get("error"):
+            await msg.reply_text(f"⚠️ Dev-Task: {res['error']}")
+            return
+        out = (f"🛠️ Fertig in `{repo.name}` (Branch `{res['branch']}`).\n\n"
+               f"*Geändert:*\n{res.get('changed', '') or '(nichts)'}\n\n"
+               f"{res.get('report', '')[:1200]}\n\n"
+               f"_Branch lokal zum Prüfen — kein Push. Merge wenn's passt._")
+        await _safe_reply(msg, out)
+    except Exception as e:
+        log.exception("devtask bg failed")
+        await msg.reply_text(f"❌ Dev-Task-Fehler: {e}")
+    finally:
+        if jid is not None:
+            jobs_mod.finish(jid)
+
+
 _ACTION_INTENTS = {"podcast", "overview", "stats", "synthesize", "draft", "finddoc", "mailme"}
 
 
@@ -730,6 +798,9 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if intent == "status":
         await msg.reply_text(jobs_mod.status_text())
+        return
+    if intent == "devtask":
+        await _present_devtask(classification, cfg, msg, ctx)
         return
     if intent in _ACTION_INTENTS:
         await _route_action(intent, text, update, ctx)
@@ -1545,6 +1616,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_mail_callback, pattern=r"^(mailt:|maile:)"))
     app.add_handler(CallbackQueryHandler(handle_clean_callback, pattern=r"^clean:"))
     app.add_handler(CallbackQueryHandler(handle_move_callback, pattern=r"^mv:"))
+    app.add_handler(CallbackQueryHandler(handle_dev_callback, pattern=r"^dev:"))
     app.add_handler(CallbackQueryHandler(handle_completion_callback, pattern=r"^(close:|closeall:|cancel$)"))
 
     _reschedule_briefing(app)

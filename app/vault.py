@@ -58,6 +58,7 @@ STEP 1 — INTENT. Decide what the user wants:
 - "synthesize"— wants to curate/synthesize their captured notes into the long-term knowledge wiki ("synthetisiere meine Notizen", "bau das ins Wiki ein", "kuratier meine Woche", "verarbeite meine letzten Notizen", "update mein Wissens-Wiki"). NOTE: this runs automatically every week — only route here on an explicit curate/wiki request. A casual "was hab ich diese Woche gemacht / fass meine Woche zusammen" is a "query" (read + summarize), NOT synthesize.
 - "mailme"    — wants something emailed to themselves ("maile mir das Briefing", "schick mir das per Mail", "per Email an mich")
 - "status"    — asking whether a background job is still running / how long it takes / if you're done ("wie lange noch", "läuft das noch", "bist du fertig", "status", "wie lange dauert das")
+- "devtask"   — wants Echo to trigger a real CODING/dev task via Claude Code in one of their repos ("baue Feature X in repo Y", "fix den Bug in Z", "lass Claude Code … umsetzen", "implementier … in <projekt>"). Only for actual code/dev work on a named project, NOT general notes.
 - "note"     — capturing a new thought, idea, observation, or future task (default)
 
 STEP 2 — only if intent is "note", classify it into a vault AND extract ALL distinct tasks.
@@ -73,7 +74,9 @@ INPUT:
 
 Return ONLY a JSON object, no prose:
 {{
-  "intent": "query" | "complete" | "event" | "mail" | "news" | "ask" | "podcast" | "overview" | "stats" | "draft" | "finddoc" | "synthesize" | "mailme" | "status" | "note",
+  "intent": "query" | "complete" | "event" | "mail" | "news" | "ask" | "podcast" | "overview" | "stats" | "draft" | "finddoc" | "synthesize" | "mailme" | "status" | "devtask" | "note",
+  "dev_repo": "<if intent=devtask: the project/repo name the user named, else empty>",
+  "dev_task": "<if intent=devtask: the concrete coding task in one clear sentence, else empty>",
   "intent_confidence": <float 0..1>,
   "vault": "<vault name from list, or empty if intent != note>",
   "confidence": <float 0..1>,
@@ -162,7 +165,7 @@ def classify(transcript: str, cfg: Config, history: str = "") -> dict:
     intent = result.get("intent", "note")
     if intent not in ("query", "complete", "note", "event", "mail", "news", "ask",
                       "podcast", "overview", "stats", "draft", "finddoc", "synthesize",
-                      "mailme", "status"):
+                      "mailme", "status", "devtask"):
         intent = "note"
     result["intent"] = intent
 

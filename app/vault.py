@@ -55,7 +55,7 @@ STEP 1 — INTENT. Decide what the user wants:
 - "stats"     — wants usage/progress statistics ("zeig mir meine Stats", "wie viel nutze ich dich", "mein Fortschritt", "XP")
 - "draft"     — wants a written draft in the user's style ("schreib mir ein Anschreiben für …", "entwirf eine Mail an …", "formulier mir …"). The full request text is the brief.
 - "finddoc"   — wants to find/search a DOCUMENT on disk or in email ("finde mein Steuerdokument", "such die Gehaltsabrechnung", "wo ist der Vertrag von …")
-- "synthesize"— wants to synthesize/curate the week's notes into the knowledge wiki ("fass meine Woche zusammen", "synthetisiere", "was hab ich diese Woche gelernt", "ins Wiki kuratieren")
+- "synthesize"— wants to curate/synthesize their captured notes into the long-term knowledge wiki ("synthetisiere meine Notizen", "bau das ins Wiki ein", "kuratier meine Woche", "verarbeite meine letzten Notizen", "update mein Wissens-Wiki"). NOTE: this runs automatically every week — only route here on an explicit curate/wiki request. A casual "was hab ich diese Woche gemacht / fass meine Woche zusammen" is a "query" (read + summarize), NOT synthesize.
 - "mailme"    — wants something emailed to themselves ("maile mir das Briefing", "schick mir das per Mail", "per Email an mich")
 - "note"     — capturing a new thought, idea, observation, or future task (default)
 

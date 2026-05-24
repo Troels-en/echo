@@ -59,7 +59,7 @@ def evening_text() -> str:
         "4) Handy in der Küche? (J/N)\n"
         "5) Koffein-Cutoff 14:00 gehalten? (J/N)\n"
         "6) Mittags gelaufen? (J/N)\n\n"
-        "Schreib einfach frei zurück (z.B. „2, 7, 6, J, J, N") — ich logge es in deinen Habits-Vault."
+        "Schreib einfach frei zurück (z.B. '2, 7, 6, J, J, N') - ich logge es in deinen Habits-Vault."
     )
 
 

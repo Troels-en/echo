@@ -65,6 +65,18 @@ async def _safe_edit(message, text: str) -> None:
             raise
 
 
+async def _safe_reply(msg, text: str) -> None:
+    """Send a new reply as Markdown; fall back to plain text on entity-parse rejection."""
+    from telegram.error import BadRequest
+    try:
+        await msg.reply_text(text, parse_mode="Markdown")
+    except BadRequest as e:
+        if "entit" in str(e).lower() or "parse" in str(e).lower():
+            await msg.reply_text(text)
+        else:
+            raise
+
+
 async def cmd_start(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     chat_id = update.effective_chat.id if update.effective_chat else None
@@ -311,45 +323,78 @@ async def _answer_query(question: str, cfg: Config, msg, history: str = "") -> N
 
 
 async def _answer_ask(question: str, cfg: Config, msg, history: str = "") -> None:
-    """General question → LLM (with optional web research) → reply + always save to vault."""
+    """General question. Quick answers come back inline; deep web research runs in the
+    background (Echo says so + an ETA) so the bot stays responsive to other messages."""
     progress = await msg.reply_text("🤔 Denke nach...")
     try:
-        result = await asyncio.to_thread(ask_mod.smart_answer, question, cfg, history)
-        answer = result.get("answer", "").strip() or "Keine Antwort."
-
-        note_path = None
-        try:
-            note_path = await asyncio.to_thread(write_answer_note, question, result, cfg)
-            try:
-                await asyncio.to_thread(
-                    store.upsert_note, cfg.data_dir / "store.db",
-                    str(note_path.resolve()), result["vault"],
-                    result.get("title", ""), question, answer,
-                )
-            except Exception as e:
-                log.error("indexing answer failed (note still written): %s", e)
-        except Exception as e:
-            log.error("saving answer note failed: %s", e)
-
-        web_tag = "🌐 Web-Recherche" if result.get("used_web") else "💬 LLM"
-        footer = f"\n\n_{web_tag} · ⭐ {result.get('importance', 3)}/5"
-        if note_path:
-            try:
-                rel = note_path.relative_to(cfg.vault_root)
-                footer += f" · 📄 `{rel}`"
-            except Exception:
-                pass
-        footer += "_"
-
-        out = answer + footer
-        if len(out) > 4000:
-            out = answer[: 3900 - len(footer)] + "\n\n_(gekürzt)_" + footer
-        await _safe_edit(progress, out)
-        shortterm_mod.add("echo", answer)
-        await _maybe_send_voice(answer, cfg, msg)
+        triage_data = await asyncio.to_thread(ask_mod.triage, question, cfg, history)
     except Exception as e:
-        log.exception("ask (general) failed")
+        log.exception("ask triage failed")
         await progress.edit_text(f"❌ Fehler: {e}")
+        return
+
+    if ask_mod.needs_web(triage_data):
+        await _safe_edit(
+            progress,
+            "🔍 Tiefen-Recherche läuft im Hintergrund — ich melde mich in ~2-3 Min mit der Antwort.\n"
+            "_Du kannst in der Zwischenzeit weiter Fragen stellen._",
+        )
+        asyncio.create_task(_finish_research_bg(question, cfg, history, triage_data, msg))
+        return
+
+    answer = (triage_data.get("answer") or "").strip() or "Keine Antwort."
+    result = ask_mod.finalize(triage_data, answer, False, cfg, question)
+    await _deliver_ask(result, question, cfg, msg, progress=progress)
+
+
+async def _finish_research_bg(question: str, cfg: Config, history: str,
+                              triage_data: dict, msg) -> None:
+    """Run the slow web research off the handler, then push the answer as a new message."""
+    try:
+        answer = await asyncio.to_thread(ask_mod.run_research, question, cfg, history)
+    except Exception as e:
+        log.exception("background research failed")
+        await msg.reply_text(f"❌ Recherche fehlgeschlagen: {e}")
+        return
+    result = ask_mod.finalize(triage_data, answer, True, cfg, question)
+    await _deliver_ask(result, question, cfg, msg, progress=None)
+
+
+async def _deliver_ask(result: dict, question: str, cfg: Config, msg, progress=None) -> None:
+    """Save the answer to the vault + send it (edit `progress` if given, else a new message)."""
+    answer = result.get("answer", "").strip() or "Keine Antwort."
+    note_path = None
+    try:
+        note_path = await asyncio.to_thread(write_answer_note, question, result, cfg)
+        try:
+            await asyncio.to_thread(
+                store.upsert_note, cfg.data_dir / "store.db",
+                str(note_path.resolve()), result["vault"],
+                result.get("title", ""), question, answer,
+            )
+        except Exception as e:
+            log.error("indexing answer failed (note still written): %s", e)
+    except Exception as e:
+        log.error("saving answer note failed: %s", e)
+
+    web_tag = "🌐 Web-Recherche" if result.get("used_web") else "💬 LLM"
+    footer = f"\n\n_{web_tag} · ⭐ {result.get('importance', 3)}/5"
+    if note_path:
+        try:
+            footer += f" · 📄 `{note_path.relative_to(cfg.vault_root)}`"
+        except Exception:
+            pass
+    footer += "_"
+
+    out = answer + footer
+    if len(out) > 4000:
+        out = answer[: 3900 - len(footer)] + "\n\n_(gekürzt)_" + footer
+    if progress is not None:
+        await _safe_edit(progress, out)
+    else:
+        await _safe_reply(msg, out)
+    shortterm_mod.add("echo", answer)
+    await _maybe_send_voice(answer, cfg, msg)
 
 
 async def _maybe_send_voice(text: str, cfg: Config, msg) -> None:

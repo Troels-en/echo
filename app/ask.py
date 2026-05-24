@@ -45,15 +45,14 @@ Include key sources/links inline. Do NOT ask follow-up questions — just answer
 QUESTION: {question}"""
 
 
-def smart_answer(question: str, cfg: Config, history: str = "") -> dict:
-    """Return {answer, title, tags, vault, importance, used_web}.
-    history: recent conversation turns (see app/shortterm) to resolve follow-ups."""
+def triage(question: str, cfg: Config, history: str = "") -> dict:
+    """Fast LLM call: decide needs_web + a direct answer if no web needed, plus filing metadata.
+    Returns the raw triage dict (keys: needs_web, answer, title, tags, vault, importance)."""
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc).astimezone().strftime("%A %Y-%m-%d %H:%M")
     vault_list = "\n".join(f"- {v.name}" for v in cfg.vaults.values())
-
-    triage = call_json(
+    return call_json(
         TRIAGE_PROMPT.format(
             now=now, question=question, vault_list=vault_list,
             history=history or "(kein vorheriger Kontext)",
@@ -61,40 +60,56 @@ def smart_answer(question: str, cfg: Config, history: str = "") -> dict:
         primary=cfg.llm_primary, fallback=cfg.llm_fallback,
     )
 
-    needs_web = bool(triage.get("needs_web"))
-    answer = (triage.get("answer") or "").strip()
-    used_web = False
 
-    if needs_web or not answer:
-        research_q = question
-        if history:
-            research_q = f"Kontext (vorheriges Gespräch):\n{history}\n\nFrage: {question}"
+def run_research(question: str, cfg: Config, history: str = "") -> str:
+    """Live web research (slow, claude -p + web tools). Returns the answer text."""
+    research_q = question
+    if history:
+        research_q = f"Kontext (vorheriges Gespräch):\n{history}\n\nFrage: {question}"
+    return research_web(
+        RESEARCH_PROMPT.format(question=research_q),
+        model=cfg.ask_model, timeout=cfg.ask_web_timeout,
+    )
+
+
+def finalize(triage_data: dict, answer: str, used_web: bool, cfg: Config,
+             question: str = "") -> dict:
+    """Normalize a triage dict + final answer into the result the bot saves/sends."""
+    vault = triage_data.get("vault") or cfg.default_vault
+    if vault not in cfg.vaults:
+        vault = cfg.default_vault
+    importance = triage_data.get("importance", 3)
+    try:
+        importance = max(1, min(5, int(importance)))
+    except (TypeError, ValueError):
+        importance = 3
+    return {
+        "answer": answer,
+        "title": (triage_data.get("title") or question[:50]).strip(),
+        "tags": triage_data.get("tags", []) or [],
+        "vault": vault,
+        "importance": importance,
+        "used_web": used_web,
+    }
+
+
+def needs_web(triage_data: dict) -> bool:
+    """True if this question should escalate to live web research."""
+    return bool(triage_data.get("needs_web")) or not (triage_data.get("answer") or "").strip()
+
+
+def smart_answer(question: str, cfg: Config, history: str = "") -> dict:
+    """Synchronous full path: triage → optional web research → normalized result.
+    history: recent conversation turns (see app/shortterm) to resolve follow-ups."""
+    t = triage(question, cfg, history)
+    answer = (t.get("answer") or "").strip()
+    used_web = False
+    if needs_web(t):
         try:
-            answer = research_web(
-                RESEARCH_PROMPT.format(question=research_q),
-                model=cfg.ask_model, timeout=cfg.ask_web_timeout,
-            )
+            answer = run_research(question, cfg, history)
             used_web = True
         except LLMError as e:
             log.warning("web research failed, falling back to triage answer: %s", e)
             if not answer:
                 answer = "Konnte keine Antwort erzeugen (Recherche fehlgeschlagen)."
-
-    vault = triage.get("vault") or cfg.default_vault
-    if vault not in cfg.vaults:
-        vault = cfg.default_vault
-
-    importance = triage.get("importance", 3)
-    try:
-        importance = max(1, min(5, int(importance)))
-    except (TypeError, ValueError):
-        importance = 3
-
-    return {
-        "answer": answer,
-        "title": (triage.get("title") or question[:50]).strip(),
-        "tags": triage.get("tags", []) or [],
-        "vault": vault,
-        "importance": importance,
-        "used_web": used_web,
-    }
+    return finalize(t, answer, used_web, cfg, question)

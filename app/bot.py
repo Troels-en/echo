@@ -23,7 +23,7 @@ from .transcribe import transcribe, TranscribeError
 from .vault import classify, write_note, write_answer_note, vault_todoist_config, find_related
 from .llm import LLMError
 from . import todoist as td
-from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod, tts as tts_mod
+from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod, tts as tts_mod, shortterm as shortterm_mod
 
 log = logging.getLogger(__name__)
 
@@ -204,14 +204,16 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         await progress.edit_text(f"🧠 Verstehe...\n\n_{transcript[:200]}_", parse_mode="Markdown")
-        # Single LLM call: intent + (if note) classification
-        classification = await asyncio.to_thread(classify, transcript, cfg)
+        # Single LLM call: intent + (if note) classification, with recent-conversation context
+        history = shortterm_mod.recent_text()
+        classification = await asyncio.to_thread(classify, transcript, cfg, history)
         intent = classification.get("intent", "note")
         log.info("voice intent: %s", intent)
         _log_event(intent, classification, transcript, "voice")
+        shortterm_mod.add("user", transcript)
         if intent == "query":
             await progress.delete()
-            await _answer_query(transcript, cfg, msg)
+            await _answer_query(transcript, cfg, msg, history)
             return
         if intent == "complete":
             await progress.delete()
@@ -231,7 +233,7 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
         if intent == "ask":
             await progress.delete()
-            await _answer_ask(transcript, cfg, msg)
+            await _answer_ask(transcript, cfg, msg, history)
             return
 
         tasks = await _create_tasks(classification)
@@ -272,7 +274,7 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             p.unlink(missing_ok=True)
 
 
-async def _answer_query(question: str, cfg: Config, msg) -> None:
+async def _answer_query(question: str, cfg: Config, msg, history: str = "") -> None:
     progress = await msg.reply_text("🔍 Suche in Vault...")
     try:
         result = await asyncio.to_thread(rag.answer_question, question, cfg)
@@ -302,16 +304,17 @@ async def _answer_query(question: str, cfg: Config, msg) -> None:
         if len(out) > 4000:
             out = out[:3900] + "\n\n_(gekürzt)_"
         await _safe_edit(progress, out)
+        shortterm_mod.add("echo", answer)
     except Exception as e:
         log.exception("ask failed")
         await progress.edit_text(f"❌ Fehler: {e}")
 
 
-async def _answer_ask(question: str, cfg: Config, msg) -> None:
+async def _answer_ask(question: str, cfg: Config, msg, history: str = "") -> None:
     """General question → LLM (with optional web research) → reply + always save to vault."""
     progress = await msg.reply_text("🤔 Denke nach...")
     try:
-        result = await asyncio.to_thread(ask_mod.smart_answer, question, cfg)
+        result = await asyncio.to_thread(ask_mod.smart_answer, question, cfg, history)
         answer = result.get("answer", "").strip() or "Keine Antwort."
 
         note_path = None
@@ -342,6 +345,7 @@ async def _answer_ask(question: str, cfg: Config, msg) -> None:
         if len(out) > 4000:
             out = answer[: 3900 - len(footer)] + "\n\n_(gekürzt)_" + footer
         await _safe_edit(progress, out)
+        shortterm_mod.add("echo", answer)
         await _maybe_send_voice(answer, cfg, msg)
     except Exception as e:
         log.exception("ask (general) failed")
@@ -607,14 +611,16 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not text:
         return
 
-    # Single LLM call: intent + (if note) classification
-    classification = await asyncio.to_thread(classify, text, cfg)
+    # Single LLM call: intent + (if note) classification, with recent-conversation context
+    history = shortterm_mod.recent_text()
+    classification = await asyncio.to_thread(classify, text, cfg, history)
     intent = classification.get("intent", "note")
     log.info("text intent: %s for %r", intent, text[:80])
     _log_event(intent, classification, text, "text")
+    shortterm_mod.add("user", text)
 
     if intent == "query":
-        await _answer_query(text, cfg, msg)
+        await _answer_query(text, cfg, msg, history)
         return
     if intent == "complete":
         await _present_completion_candidates(text, cfg, msg)
@@ -629,7 +635,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await _send_news(cfg, msg)
         return
     if intent == "ask":
-        await _answer_ask(text, cfg, msg)
+        await _answer_ask(text, cfg, msg, history)
         return
     await _ingest_text(text, cfg, msg, classification=classification)
 

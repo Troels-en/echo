@@ -15,6 +15,9 @@ TRIAGE_PROMPT = """You answer a general question for the user (NOT from their pe
 
 NOW (Europe/Berlin): {now}
 
+RECENT CONVERSATION (use to resolve references / follow-ups; may be empty):
+{history}
+
 QUESTION:
 \"\"\"{question}\"\"\"
 
@@ -42,15 +45,19 @@ Include key sources/links inline. Do NOT ask follow-up questions — just answer
 QUESTION: {question}"""
 
 
-def smart_answer(question: str, cfg: Config) -> dict:
-    """Return {answer, title, tags, vault, importance, used_web}."""
+def smart_answer(question: str, cfg: Config, history: str = "") -> dict:
+    """Return {answer, title, tags, vault, importance, used_web}.
+    history: recent conversation turns (see app/shortterm) to resolve follow-ups."""
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc).astimezone().strftime("%A %Y-%m-%d %H:%M")
     vault_list = "\n".join(f"- {v.name}" for v in cfg.vaults.values())
 
     triage = call_json(
-        TRIAGE_PROMPT.format(now=now, question=question, vault_list=vault_list),
+        TRIAGE_PROMPT.format(
+            now=now, question=question, vault_list=vault_list,
+            history=history or "(kein vorheriger Kontext)",
+        ),
         primary=cfg.llm_primary, fallback=cfg.llm_fallback,
     )
 
@@ -59,9 +66,12 @@ def smart_answer(question: str, cfg: Config) -> dict:
     used_web = False
 
     if needs_web or not answer:
+        research_q = question
+        if history:
+            research_q = f"Kontext (vorheriges Gespräch):\n{history}\n\nFrage: {question}"
         try:
             answer = research_web(
-                RESEARCH_PROMPT.format(question=question),
+                RESEARCH_PROMPT.format(question=research_q),
                 model=cfg.ask_model, timeout=cfg.ask_web_timeout,
             )
             used_web = True

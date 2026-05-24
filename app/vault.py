@@ -39,6 +39,10 @@ NOW (user local time, Europe/Berlin): {now}
 WHAT YOU KNOW ABOUT THE USER (use to disambiguate names/projects; do NOT re-extract these):
 {memory}
 
+RECENT CONVERSATION (most recent last; use ONLY to resolve references like "das", "dazu",
+"weißt du was ich meine", follow-up questions — do NOT re-file old turns):
+{history}
+
 STEP 1 — INTENT. Decide what the user wants:
 - "query"    — asking a question wanting an answer from their notes ("Was waren meine besten Ideen?", "Wie war mein letzter Lauf?")
 - "complete" — reporting finished task(s) ("Habe X gekauft", "Bewerbung verschickt", "die letzten drei Punkte erledigt")
@@ -116,8 +120,9 @@ def _vault_list(vaults: dict[str, VaultSpec]) -> str:
     return "\n".join(lines)
 
 
-def classify(transcript: str, cfg: Config) -> dict:
-    """Single LLM call: returns intent + (if note) full vault classification."""
+def classify(transcript: str, cfg: Config, history: str = "") -> dict:
+    """Single LLM call: returns intent + (if note) full vault classification.
+    history: recent conversation turns (see app/shortterm) to resolve follow-ups."""
     routing = _load_vault_routing()
     label_defs = routing.get("labels", {})
     if label_defs:
@@ -132,6 +137,7 @@ def classify(transcript: str, cfg: Config) -> dict:
         labels=labels_str,
         now=now.strftime("%A %Y-%m-%d %H:%M"),
         memory=mem_context,
+        history=history or "(kein vorheriger Kontext)",
         transcript=transcript.replace('"""', "'''"),
     )
     result = call_json(prompt, primary=cfg.llm_primary, fallback=cfg.llm_fallback)

@@ -21,6 +21,7 @@ TOKEN = ROOT / "secrets" / "google_token.json"
 SCOPES = [
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
 ]
 
 
@@ -34,7 +35,7 @@ def main() -> None:
     creds = flow.run_local_server(port=0)
     TOKEN.write_text(creds.to_json(), encoding="utf-8")
     print(f"OK. Token saved to {TOKEN}")
-    print("The bot can now access Google Calendar + Gmail (read-only).")
+    print("The bot can now access Google Calendar + Gmail (read + send).")
 
 
 if __name__ == "__main__":

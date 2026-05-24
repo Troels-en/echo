@@ -247,6 +247,10 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await progress.delete()
             await _answer_ask(transcript, cfg, msg, history)
             return
+        if intent in _ACTION_INTENTS:
+            await progress.delete()
+            await _route_action(intent, transcript, update, ctx)
+            return
 
         tasks = await _create_tasks(classification)
         related = await asyncio.to_thread(find_related, transcript, classification["vault"], cfg)
@@ -646,6 +650,26 @@ async def cmd_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _answer_ask(question, cfg, update.message)
 
 
+_ACTION_INTENTS = {"podcast", "overview", "stats", "synthesize", "draft", "finddoc", "mailme"}
+
+
+async def _route_action(intent: str, text: str, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Route a natural-language action intent to its slash-command handler, so the user
+    never has to remember slash commands. Arg-taking actions get the message as their args."""
+    if intent in ("draft", "finddoc", "mailme"):
+        ctx.args = text.split()
+    handler = {
+        "podcast": cmd_podcast,
+        "overview": cmd_overview,
+        "stats": cmd_stats,
+        "synthesize": cmd_synthesize,
+        "draft": cmd_draft,
+        "finddoc": cmd_finddoc,
+        "mailme": cmd_mailme,
+    }[intent]
+    await handler(update, ctx)
+
+
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Plain-text message → intent classifier → route."""
     cfg: Config = ctx.application.bot_data["cfg"]
@@ -681,6 +705,9 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if intent == "ask":
         await _answer_ask(text, cfg, msg, history)
+        return
+    if intent in _ACTION_INTENTS:
+        await _route_action(intent, text, update, ctx)
         return
     await _ingest_text(text, cfg, msg, classification=classification)
 

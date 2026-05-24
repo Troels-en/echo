@@ -50,6 +50,13 @@ STEP 1 — INTENT. Decide what the user wants:
 - "mail"      — wants the assistant to check/read/triage their email ("Check meine Mails", "Was ist in meinem Postfach", "übernimm meine Mails")
 - "news"      — wants news / latest developments ("Was gibt's Neues", "news", "Entwicklungen in KI", "Accelerator-Deadlines")
 - "ask"       — a GENERAL question about the world, facts, how-to, research — NOT about the user's own notes ("Was ist ein SAFE-Note?", "Erklär mir Vector-DBs", "Recherchier die besten Whisper-Modelle", "Wie funktioniert X?"). Use this when answering needs general knowledge or live research, not the user's vault.
+- "podcast"   — wants the briefing as an AUDIO podcast ("mach mir einen Podcast", "lies mir das als Podcast vor", "Audio-Briefing")
+- "overview"  — wants a dashboard/overview of everything fed into Echo ("zeig mir eine Übersicht", "was hab ich alles drin", "Dashboard")
+- "stats"     — wants usage/progress statistics ("zeig mir meine Stats", "wie viel nutze ich dich", "mein Fortschritt", "XP")
+- "draft"     — wants a written draft in the user's style ("schreib mir ein Anschreiben für …", "entwirf eine Mail an …", "formulier mir …"). The full request text is the brief.
+- "finddoc"   — wants to find/search a DOCUMENT on disk or in email ("finde mein Steuerdokument", "such die Gehaltsabrechnung", "wo ist der Vertrag von …")
+- "synthesize"— wants to synthesize/curate the week's notes into the knowledge wiki ("fass meine Woche zusammen", "synthetisiere", "was hab ich diese Woche gelernt", "ins Wiki kuratieren")
+- "mailme"    — wants something emailed to themselves ("maile mir das Briefing", "schick mir das per Mail", "per Email an mich")
 - "note"     — capturing a new thought, idea, observation, or future task (default)
 
 STEP 2 — only if intent is "note", classify it into a vault AND extract ALL distinct tasks.
@@ -65,7 +72,7 @@ INPUT:
 
 Return ONLY a JSON object, no prose:
 {{
-  "intent": "query" | "complete" | "event" | "mail" | "news" | "ask" | "note",
+  "intent": "query" | "complete" | "event" | "mail" | "news" | "ask" | "podcast" | "overview" | "stats" | "draft" | "finddoc" | "synthesize" | "mailme" | "note",
   "intent_confidence": <float 0..1>,
   "vault": "<vault name from list, or empty if intent != note>",
   "confidence": <float 0..1>,
@@ -152,7 +159,8 @@ def classify(transcript: str, cfg: Config, history: str = "") -> dict:
             log.warning("memory add failed: %s", e)
 
     intent = result.get("intent", "note")
-    if intent not in ("query", "complete", "note", "event", "mail", "news", "ask"):
+    if intent not in ("query", "complete", "note", "event", "mail", "news", "ask",
+                      "podcast", "overview", "stats", "draft", "finddoc", "synthesize", "mailme"):
         intent = "note"
     result["intent"] = intent
 

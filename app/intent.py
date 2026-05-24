@@ -7,9 +7,12 @@ import logging
 
 import httpx
 
+from datetime import datetime, timezone
+
 from .config import Config
 from .llm import call_json
 from .todoist import _hdr, API
+from . import memory
 
 log = logging.getLogger(__name__)
 
@@ -86,6 +89,62 @@ def fetch_open_tasks(limit: int = 60) -> list[dict]:
             "number one thing", "Organize these tasks", "Get organized anywhere")
     clean = [t for t in tasks if not any(j in t.get("content", "") for j in junk)]
     return clean[:limit]
+
+
+RANK_PROMPT = """You prioritize the user's open tasks. Decide what they should do FIRST.
+
+NOW (Europe/Berlin): {now}
+
+WHAT YOU KNOW ABOUT THE USER (their goals/projects — weight tasks that serve these higher):
+{memory}
+
+USER'S STATED FOCUS RIGHT NOW (if any): {focus}
+
+OPEN TASKS (content · due · todoist priority 1-4):
+{tasks}
+
+Rank by what truly matters now: hard deadlines first, then alignment with the user's goals,
+then todoist priority. A near deadline (today/this week) on something important beats everything.
+
+Return ONLY JSON:
+{{
+  "ranked": [
+    {{"content": "<task content, verbatim>", "why": "<one short reason: deadline / goal-fit / urgency>"}}
+  ],
+  "note": "<one short overall hint, e.g. what to drop or batch; optional>"
+}}
+Rank at most the top 6. Be decisive."""
+
+
+def rank_tasks(cfg: Config, focus: str = "") -> str:
+    """Fetch open tasks and LLM-rank them by deadline + the user's goals (from memory)."""
+    tasks = fetch_open_tasks(limit=60)
+    if not tasks:
+        return "✅ Keine offenen Tasks."
+    lines = []
+    for t in tasks:
+        due = t.get("due") or {}
+        due_s = (due.get("string") or due.get("date") or "kein") if isinstance(due, dict) else "kein"
+        lines.append(f"- {t.get('content','')!r} · due={due_s} · prio={t.get('priority', 1)}")
+    now = datetime.now(timezone.utc).astimezone().strftime("%A %Y-%m-%d %H:%M")
+    try:
+        r = call_json(
+            RANK_PROMPT.format(now=now, memory=memory.context() or "(nichts bekannt)",
+                               focus=focus or "(nicht genannt)", tasks="\n".join(lines)),
+            primary=cfg.llm_primary, fallback=cfg.llm_fallback,
+        )
+    except Exception as e:
+        log.warning("rank failed: %s", e)
+        return "❌ Priorisierung fehlgeschlagen."
+    ranked = r.get("ranked") or []
+    if not ranked:
+        return "Konnte nicht priorisieren."
+    out = ["🎯 *Was zuerst:*"]
+    for i, item in enumerate(ranked[:6], 1):
+        out.append(f"{i}. *{item.get('content','')[:70]}*\n   _{item.get('why','')[:90]}_")
+    if r.get("note"):
+        out.append(f"\n💡 {r['note']}")
+    return "\n".join(out)
 
 
 def match_tasks_for_completion(text: str, cfg: Config) -> tuple[list[dict], str]:

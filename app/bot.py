@@ -151,6 +151,46 @@ async def cmd_id(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"User ID: `{user.id}`", parse_mode="Markdown")
 
 
+COMMANDS_HELP = """🤖 *Echo — Befehle*
+
+*Allgemein*
+• `/start` — Bot starten, Chat verknüpfen
+• `/help` — Diese Befehlsübersicht
+• `/id` — Deine User-ID
+• `/ask <frage>` — Allgemeine Frage / Web-Recherche
+• `/voice on|off` — Sprachantworten umschalten
+
+*Briefing & News*
+• `/briefing` — Daily-Briefing jetzt
+• `/briefingtime <HH:MM>` — Briefing-Uhrzeit setzen
+• `/news` — News-Briefing
+• `/mail` — Gmail-Triage
+• `/mailme [thema]` — Briefing/Recherche per Mail an dich
+• `/podcast` — Audio-Briefing erzeugen
+
+*Notizen & Dokumente*
+• `/inbox` — Inbox-Notizen reviewen
+• `/finddoc <begriff>` — Dokument suchen (Disk + Mail)
+• `/indexdocs` — Dokument-Index neu bauen
+• `/draft` — Anschreiben-Entwurf in deinem Stil
+• `/synthesize` — Wochen-Synthese ins Wiki
+• `/overview` — Obsidian-Dashboard aktualisieren
+• `/stats` — Nutzungs-Stats / XP
+
+*Memory*
+• `/memory` — Gespeicherte Fakten anzeigen
+• `/editmemory <id> <text>` — Fakt bearbeiten
+• `/mergememory` — Fakten zusammenführen
+• `/forget <id|stichwort>` — Fakt löschen
+• `/memorymd` — MEMORY.md anzeigen
+
+_Tipp: meist reicht normales Reden — Befehle sind optional._"""
+
+
+async def cmd_help(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(COMMANDS_HELP, parse_mode="Markdown")
+
+
 async def _create_tasks(classification: dict) -> list[td.Task]:
     """Create one Todoist task per extracted action. Returns created tasks."""
     task_list = classification.get("tasks") or []
@@ -256,6 +296,14 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if intent == "devtask":
             await progress.delete()
             await _present_devtask(classification, cfg, msg, ctx)
+            return
+        if intent == "prioritize":
+            await progress.delete()
+            await _do_prioritize(transcript, cfg, msg)
+            return
+        if intent == "help":
+            await progress.delete()
+            await msg.reply_text(HELP_TEXT, parse_mode="Markdown")
             return
         if intent in _ACTION_INTENTS:
             await progress.delete()
@@ -748,6 +796,42 @@ async def _route_action(intent: str, text: str, update: Update, ctx: ContextType
     await handler(update, ctx)
 
 
+HELP_TEXT = """🧠 *Echo — was ich kann* (einfach normal sagen, keine Befehle nötig)
+
+*Festhalten & Wissen*
+• Idee/Gedanke → landet als Notiz im richtigen Vault (+ Todoist-Task)
+• „Was waren meine Ideen zu X?" → Antwort aus deinen Notizen
+• „Was ist ein SAFE-Note?" → allgemeine Antwort / Web-Recherche (im Hintergrund)
+
+*Organisieren*
+• „erledigt: X" → schließt passende Tasks
+• „was soll ich zuerst machen?" → priorisiert deine Tasks
+• „morgen 15 Uhr Zahnarzt" → Kalender-Termin
+• „check meine Mails" → Gmail-Triage
+
+*Output*
+• „mach mir einen Podcast" → Audio-Briefing
+• „lies mir das vor" / `/voice on` → Sprachantworten
+• „schreib mir ein Anschreiben für …" → Entwurf in deinem Stil
+• „finde mein Steuerdokument" → Doc-Suche (Disk + Mail)
+• „maile mir das Briefing" → E-Mail an dich
+• „zeig mir eine Übersicht / meine Stats" → Dashboard / XP
+
+*Wissen & Dev*
+• „fass meine Woche zusammen" → Synthese ins SecondBrain-Wiki
+• „baue X in repo Y" → Claude-Code-Agent (mit Bestätigung)
+
+*Proaktiv*: morgens Fokus-Nudge, abends Habit-Check-in.
+*Status*: „wie lange dauert das noch?" → echter Job-Status.
+"""
+
+
+async def _do_prioritize(text: str, cfg: Config, msg) -> None:
+    progress = await msg.reply_text("🎯 Priorisiere deine Tasks...")
+    out = await asyncio.to_thread(intent_mod.rank_tasks, cfg, text)
+    await _safe_edit(progress, out)
+
+
 async def _maybe_answer_followup(classification: dict, cfg: Config, msg, history: str = "") -> None:
     """Multi-intent: if the message also held a question on top of a capture/action, answer it."""
     q = (classification.get("also_question") or "").strip()
@@ -813,6 +897,12 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if intent == "devtask":
         await _present_devtask(classification, cfg, msg, ctx)
+        return
+    if intent == "prioritize":
+        await _do_prioritize(text, cfg, msg)
+        return
+    if intent == "help":
+        await msg.reply_text(HELP_TEXT, parse_mode="Markdown")
         return
     if intent in _ACTION_INTENTS:
         await _route_action(intent, text, update, ctx)
@@ -933,6 +1023,19 @@ async def cmd_news(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update, cfg):
         return
     await _send_news(cfg, update.message)
+
+
+async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update, ctx.application.bot_data["cfg"]):
+        return
+    await update.message.reply_text(HELP_TEXT, parse_mode="Markdown")
+
+
+async def cmd_prioritize(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    cfg: Config = ctx.application.bot_data["cfg"]
+    if not _is_allowed(update, cfg):
+        return
+    await _do_prioritize(" ".join(ctx.args) if ctx.args else "", cfg, update.message)
 
 
 def _mail_scope_hint(e: Exception) -> str:
@@ -1601,6 +1704,7 @@ def main() -> None:
         log.warning("SecondBrain wiki index at startup failed: %s", e)
 
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("ask", cmd_ask))
     app.add_handler(CommandHandler("briefing", cmd_briefing))
@@ -1621,6 +1725,8 @@ def main() -> None:
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("mailme", cmd_mailme))
     app.add_handler(CommandHandler("synthesize", cmd_synthesize))
+    app.add_handler(CommandHandler("prioritize", cmd_prioritize))
+    app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("voice", cmd_voice))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

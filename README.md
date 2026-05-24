@@ -36,13 +36,21 @@ Every destructive or external action is **confirm-before-act**. Echo never silen
 - **Daily + news briefing** — morning push; news with dates, recency check, plain-language explanations tied to your context
 - **Memory** — learns durable facts about you; inspect and correct them (`/memory`, `/editmemory`, `/forget`)
 
-### Added capabilities (commands)
-- **Voice replies** — `/voice on` makes Echo answer with a spoken voice memo (ElevenLabs TTS)
-- **Audio podcast** — `/podcast` turns the briefing into a German audio podcast
-- **Document search** — `/indexdocs` then `/finddoc <q>`: search documents on disk (`~/Documents`) + Gmail attachments, summarize, link into a vault
-- **Writing agent** — `/draft <brief>`: humanized German drafts (e.g. cover letters) in your own style, from a `Self_Vault` of facts + style about you
-- **Overview** — `/overview`: an Obsidian dashboard + Telegram summary + Notion mirror of everything you've fed in
-- **Progress stats** — `/stats`: usage, intent breakdown, streak, XP, with a chart
+### More capabilities (all reachable by just talking — slash commands optional)
+- **No commands to memorize** — the intent router maps natural language ("mach mir einen Podcast", "finde mein Steuerdokument", "was zuerst?") to the right capability. `/help` lists everything.
+- **Conversation memory** — remembers the last ~10 turns so follow-ups ("und wer nutzt das?") resolve in context.
+- **Multi-intent** — one message can hold a capture *and* a question; Echo does both (files the task **and** answers).
+- **Background web research** — deep questions run off-thread ("researching, back in ~2-3 min"); the bot stays responsive. Ask "wie lange noch?" for a real job status.
+- **Voice replies** — Echo answers with a spoken voice memo (ElevenLabs / Gemini TTS).
+- **Audio podcast** — turns the briefing into a two-host German podcast (Gemini multi-speaker TTS, with fallbacks).
+- **Document search** — searches documents on disk + Gmail attachments, summarizes, links into a vault.
+- **Writing agent** — humanized German drafts (e.g. cover letters) in your own style, from a `Self_Vault` about you.
+- **Overview & stats** — Obsidian dashboard + Telegram summary + Notion mirror; usage/streak/XP with a chart.
+- **Task prioritization** — ranks open tasks by deadline + your goals (from memory), tells you what to do first.
+- **SecondBrain bridge** — a curated LLM-Wiki is indexed into Echo's RAG; a weekly job synthesizes your notes into it.
+- **Proactive nudges** — morning focus + evening habit check-in (grounded in your Habits vault); replies logged automatically.
+- **Email to self** — emails you a briefing or a researched topic (Gmail).
+- **Dev-task trigger** — "baue X in repo Y" spawns a headless Claude Code agent in that repo (on a new branch, never pushed) after you confirm.
 
 ---
 
@@ -104,7 +112,8 @@ bash scripts/download_model.sh small        # or large-v3-turbo for best quality
 - **Google Calendar + Gmail:** see comments in `.env` — create OAuth credentials, run `python scripts/google_auth.py`
 - **Voice replies + podcast:** add `ELEVENLABS_API_KEY` to `.env` (text-to-speech + voices scopes). Falls back to macOS `say` if absent.
 - **Document search:** set `DOC_SEARCH_ROOT` in `.env` (default `~/Documents`), then `/indexdocs` in the bot.
-- **Notion mirror** (`/overview`): goes through the Claude Notion MCP; runs agent/cron-side, not in the bot process.
+- **Notion mirror**: no token needed — Echo delegates to a `claude -p` agent that uses the account-connected Notion MCP.
+- **Dev-task trigger:** repos under `DEV_ROOT` (default `~`) are eligible; the agent works on a new branch and never pushes.
 
 ### Run
 ```bash
@@ -125,6 +134,16 @@ Set in `.env`:
 - Notes are plain Markdown on your disk. Audio is transcribed locally and deleted.
 - Secrets live in `.env` and `secrets/` — both gitignored. Never commit them.
 - Embeddings/memory/state live in `data/` — gitignored, never leaves your machine.
+
+## Disclaimer
+
+Personal project, shared as-is — **use at your own risk**, no warranty.
+
+- **Autonomous agents:** the dev-task trigger runs a headless coding agent that writes and commits code in your repos. It works on a new branch and never pushes, but **review the diff before merging.** Treat generated code as a draft.
+- **It acts on your accounts:** reads Gmail/Calendar, creates Todoist tasks, can email **you** (never others — outreach is draft-only by design). Confirm-before-act on destructive/outbound steps.
+- **Bring your own keys/accounts.** You need your own Telegram bot, LLM (CLI subscription or API key), and optional integration credentials. Costs (LLM/TTS) are yours.
+- **Unofficial integrations** (e.g. NotebookLM via `notebooklm-py`) can break when providers change; treat them as best-effort.
+- Not affiliated with Anthropic, OpenAI, Google, Notion, Todoist, or Telegram.
 
 ## License
 MIT — see [LICENSE](LICENSE).

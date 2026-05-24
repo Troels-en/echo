@@ -792,6 +792,13 @@ async def _do_prioritize(text: str, cfg: Config, msg) -> None:
     await _safe_edit(progress, out)
 
 
+async def _mirror_notion_bg(date: str, entry: str, msg) -> None:
+    """Mirror a habit check-in to Notion via the agent bridge (slow, background)."""
+    ok = await asyncio.to_thread(notionsync_mod.mirror_habit_log, date, entry)
+    if ok:
+        await msg.reply_text("🔁 Auch in Notion gespiegelt.")
+
+
 async def _maybe_answer_followup(classification: dict, cfg: Config, msg, history: str = "") -> None:
     """Multi-intent: if the message also held a question on top of a capture/action, answer it."""
     q = (classification.get("also_question") or "").strip()
@@ -818,10 +825,8 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             path = await asyncio.to_thread(proactive_mod.log_checkin, text)
             shortterm_mod.add("user", text)
             shortterm_mod.add("echo", "[Habit-Check-in geloggt]")
-            mirrored = await asyncio.to_thread(
-                notionsync_mod.mirror_habit_log, path.stem.replace("-checkin", ""), text)
-            tail = " (auch in Notion gespiegelt)" if mirrored else ""
-            await msg.reply_text(f"✅ Im Habits-Vault eingetragen ({path.name}){tail}. Gut gemacht.")
+            await msg.reply_text(f"✅ Im Habits-Vault eingetragen ({path.name}). Gut gemacht.")
+            asyncio.create_task(_mirror_notion_bg(path.stem.replace("-checkin", ""), text, msg))
         except Exception as e:
             log.exception("checkin log failed")
             await msg.reply_text(f"❌ Konnte Check-in nicht loggen: {e}")

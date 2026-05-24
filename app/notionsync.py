@@ -1,52 +1,42 @@
-"""Mirror habit check-ins into Notion (read-only convenience layer). Habits_Vault stays the
-source of truth; this just appends a line to a Notion page so the user can read in Notion.
-
-Needs a Notion internal integration (NOTION_TOKEN) + the target page shared with it
-(NOTION_HABITS_PAGE). If unset, mirroring is silently skipped — local vault log still happens.
+"""Mirror habit check-ins into Notion — via a headless `claude -p` agent that has the
+Notion MCP (account-connected), so NO token/page setup is needed. The agent finds or
+creates the target page itself. Habits_Vault stays the source of truth; this is a
+read-only convenience mirror. Best-effort: failures never block the check-in.
 """
 from __future__ import annotations
 
 import logging
-import os
-
-import httpx
+import subprocess
 
 log = logging.getLogger(__name__)
 
-_TOKEN = os.getenv("NOTION_TOKEN", "").strip()
-_PAGE = os.getenv("NOTION_HABITS_PAGE", "").strip()
-_API = "https://api.notion.com/v1"
-_VERSION = "2022-06-28"
+_CLAUDE_BIN = "claude"
+_NOTION_TOOLS = [
+    "mcp__claude_ai_Notion__notion-search",
+    "mcp__claude_ai_Notion__notion-fetch",
+    "mcp__claude_ai_Notion__notion-create-pages",
+    "mcp__claude_ai_Notion__notion-update-page",
+]
 
 
-def configured() -> bool:
-    return bool(_TOKEN and _PAGE)
-
-
-def mirror_habit_log(date: str, entry: str) -> bool:
-    """Append '<date>: <entry>' as a bullet to the configured Notion page. Best-effort."""
-    if not configured():
-        return False
-    headers = {
-        "Authorization": f"Bearer {_TOKEN}",
-        "Notion-Version": _VERSION,
-        "Content-Type": "application/json",
-    }
-    body = {
-        "children": [{
-            "object": "block",
-            "type": "bulleted_list_item",
-            "bulleted_list_item": {
-                "rich_text": [{"type": "text", "text": {"content": f"{date}: {entry}"[:1900]}}],
-            },
-        }]
-    }
+def mirror_habit_log(date: str, entry: str, timeout: int = 180) -> bool:
+    """Append '<date>: <entry>' to a Notion page 'Echo Habit Log' (create if missing),
+    via a claude agent using the Notion MCP. Returns True on success."""
+    prompt = (
+        "Use the Notion MCP. Append my daily habit check-in to a Notion page titled "
+        "'Echo Habit Log' — create that page in my workspace if it doesn't exist yet. "
+        f"Add exactly one bulleted line: \"{date}: {entry}\". Do not duplicate existing "
+        "lines. Reply only with 'DONE' when added."
+    )
+    cmd = [_CLAUDE_BIN, "-p", prompt,
+           "--allowedTools", *_NOTION_TOOLS,
+           "--output-format", "text"]
     try:
-        r = httpx.patch(f"{_API}/blocks/{_PAGE}/children", json=body, headers=headers, timeout=20.0)
-        if r.status_code != 200:
-            log.warning("notion mirror %s: %s", r.status_code, r.text[:200])
-            return False
-        return True
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        ok = res.returncode == 0 and "DONE" in (res.stdout or "").upper()
+        if not ok:
+            log.warning("notion mirror agent: rc=%s out=%s", res.returncode, (res.stdout or "")[-200:])
+        return ok
     except Exception as e:
         log.warning("notion mirror failed: %s", e)
         return False

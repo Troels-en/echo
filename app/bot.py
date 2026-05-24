@@ -27,6 +27,9 @@ from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing a
 
 log = logging.getLogger(__name__)
 
+# whisper-server processes one transcription at a time → serialize voice notes.
+_transcribe_lock = asyncio.Lock()
+
 
 def _is_allowed(update: Update, cfg: Config) -> bool:
     if not cfg.allowed_user_ids:
@@ -208,9 +211,14 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         tg_file = await voice.get_file()
         await tg_file.download_to_drive(custom_path=str(ogg_path))
 
-        await progress.edit_text("🎙️ Transkribiere...")
-        wav_path = await asyncio.to_thread(_to_wav, ogg_path)
-        transcript = await asyncio.to_thread(transcribe, wav_path, cfg.whisper_model_path)
+        # Serialize transcription: the whisper-server handles one job at a time, so two
+        # voice notes in quick succession would otherwise clobber each other.
+        if _transcribe_lock.locked():
+            await progress.edit_text("⏳ Eine andere Voice-Note wird gerade transkribiert — du bist als Nächstes...")
+        async with _transcribe_lock:
+            await progress.edit_text("🎙️ Transkribiere...")
+            wav_path = await asyncio.to_thread(_to_wav, ogg_path)
+            transcript = await asyncio.to_thread(transcribe, wav_path, cfg.whisper_model_path)
         if not transcript.strip():
             await progress.edit_text("⚠️ Leere Transkription.")
             return

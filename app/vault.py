@@ -59,6 +59,7 @@ STEP 1 — INTENT. Decide what the user wants:
 - "mailme"    — wants something emailed to themselves ("maile mir das Briefing", "schick mir das per Mail", "per Email an mich")
 - "status"    — asking whether a background job is still running / how long it takes / if you're done ("wie lange noch", "läuft das noch", "bist du fertig", "status", "wie lange dauert das")
 - "devtask"   — wants Echo to trigger a real CODING/dev task via Claude Code in one of their repos ("baue Feature X in repo Y", "fix den Bug in Z", "lass Claude Code … umsetzen", "implementier … in <projekt>"). Only for actual code/dev work on a named project, NOT general notes.
+- "agenttask"  — wants Echo to EXECUTE a multi-step action on their knowledge/data using its tools (Notion + Obsidian vaults + files), NOT just note it. e.g. "zieh meine Notion-Habits in den Vault", "übertrag X aus Notion nach Y", "räum SecondBrain auf", "fass meine Finance-Notizen zu einer Seite zusammen", "sync …". Use this when the user asks Echo to DO/transfer/organize/consolidate something across Notion/vaults — not for code (devtask), not for a simple capture (note).
 - "prioritize"— wants their OPEN tasks ranked / what to do first ("was soll ich zuerst machen", "priorisier meine Tasks", "was ist am wichtigsten", "womit anfangen", "was ist dringend")
 - "help"      — wants to know what Echo can do ("was kannst du", "hilfe", "welche Befehle", "help", "was geht alles")
 - "note"     — capturing a new thought, idea, observation, or future task (default)
@@ -79,6 +80,7 @@ Return ONLY a JSON object, no prose:
   "intent": "query" | "complete" | "event" | "mail" | "news" | "ask" | "podcast" | "overview" | "stats" | "draft" | "finddoc" | "synthesize" | "mailme" | "status" | "devtask" | "prioritize" | "help" | "note",
   "dev_repo": "<if intent=devtask: the project/repo name the user named, else empty>",
   "dev_task": "<if intent=devtask: the concrete coding task in one clear sentence, else empty>",
+  "agent_task": "<if intent=agenttask: the action to execute in one clear sentence, else empty>",
   "also_question": "<if the message ALSO contains a separate question on top of a note/task/event/complete (e.g. 'priorisierst du Tasks? Übrigens ich muss mich bewerben'), put that question here so it gets answered too; else empty>",
   "intent_confidence": <float 0..1>,
   "vault": "<vault name from list, or empty if intent != note>",
@@ -169,7 +171,7 @@ def classify(transcript: str, cfg: Config, history: str = "") -> dict:
     intent = result.get("intent", "note")
     if intent not in ("query", "complete", "note", "event", "mail", "news", "ask",
                       "podcast", "overview", "stats", "draft", "finddoc", "synthesize",
-                      "mailme", "status", "devtask", "prioritize", "help"):
+                      "mailme", "status", "devtask", "agenttask", "prioritize", "help"):
         intent = "note"
     result["intent"] = intent
 

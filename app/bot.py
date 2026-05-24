@@ -23,7 +23,7 @@ from .transcribe import transcribe, TranscribeError
 from .vault import classify, write_note, write_answer_note, vault_todoist_config, find_related
 from .llm import LLMError
 from . import todoist as td
-from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod, tts as tts_mod, shortterm as shortterm_mod, secondbrain as secondbrain_mod, jobs as jobs_mod, proactive as proactive_mod, devtask as devtask_mod, notionsync as notionsync_mod
+from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod, tts as tts_mod, shortterm as shortterm_mod, secondbrain as secondbrain_mod, jobs as jobs_mod, proactive as proactive_mod, devtask as devtask_mod, notionsync as notionsync_mod, agenttask as agenttask_mod
 
 log = logging.getLogger(__name__)
 
@@ -256,6 +256,10 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if intent == "devtask":
             await progress.delete()
             await _present_devtask(classification, cfg, msg, ctx)
+            return
+        if intent == "agenttask":
+            await progress.delete()
+            await _present_agenttask(classification, cfg, msg, ctx)
             return
         if intent == "prioritize":
             await progress.delete()
@@ -736,6 +740,57 @@ async def _run_devtask_bg(repo: Path, task: str, msg, jid: int | None = None) ->
             jobs_mod.finish(jid)
 
 
+def _pending_agenttasks(ctx) -> dict:
+    return ctx.application.bot_data.setdefault("pending_agenttasks", {})
+
+
+async def _present_agenttask(classification: dict, cfg: Config, msg, ctx) -> None:
+    """Confirmation gate before Echo runs a general executor agent on Notion/vaults/files."""
+    task = (classification.get("agent_task") or "").strip()
+    if not task:
+        await msg.reply_text("🤖 Was genau soll ich ausführen (z.B. 'zieh meine Notion-Habits in den Vault')?")
+        return
+    token = uuid4().hex[:8]
+    _pending_agenttasks(ctx)[token] = {"task": task}
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Ausführen", callback_data=f"agt:{token}"),
+        InlineKeyboardButton("✗ Abbrechen", callback_data="cancel"),
+    ]])
+    await msg.reply_text(
+        f"🤖 *Aufgabe ausführen* (Notion + Vaults, additiv/non-destruktiv)\n📝 {task}\n\nStarten?",
+        parse_mode="Markdown", reply_markup=kb)
+
+
+async def handle_agenttask_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    token = q.data.split(":", 1)[1]
+    pend = _pending_agenttasks(ctx).pop(token, None)
+    if not pend:
+        await q.edit_message_text("Aufgabe abgelaufen.")
+        return
+    await q.edit_message_text(
+        "🤖 Läuft im Hintergrund — ich melde mich mit dem Ergebnis. "
+        "_Du kannst weiter fragen._", parse_mode="Markdown")
+    jid = jobs_mod.start("agenttask", pend["task"][:60])
+    asyncio.create_task(_run_agenttask_bg(pend["task"], q.message, jid))
+
+
+async def _run_agenttask_bg(task: str, msg, jid: int | None = None) -> None:
+    try:
+        res = await asyncio.to_thread(agenttask_mod.run_agenttask, task)
+        if res.get("error"):
+            await msg.reply_text(f"⚠️ Aufgabe: {res['error']}\n\n{res.get('report','')[:800]}")
+            return
+        await _safe_reply(msg, f"🤖 *Fertig.*\n\n{res.get('report', '')[:1800]}")
+    except Exception as e:
+        log.exception("agenttask bg failed")
+        await msg.reply_text(f"❌ Aufgabe-Fehler: {e}")
+    finally:
+        if jid is not None:
+            jobs_mod.finish(jid)
+
+
 _ACTION_INTENTS = {"podcast", "overview", "stats", "synthesize", "draft", "finddoc", "mailme"}
 
 
@@ -865,6 +920,9 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if intent == "devtask":
         await _present_devtask(classification, cfg, msg, ctx)
+        return
+    if intent == "agenttask":
+        await _present_agenttask(classification, cfg, msg, ctx)
         return
     if intent == "prioritize":
         await _do_prioritize(text, cfg, msg)
@@ -1703,6 +1761,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_clean_callback, pattern=r"^clean:"))
     app.add_handler(CallbackQueryHandler(handle_move_callback, pattern=r"^mv:"))
     app.add_handler(CallbackQueryHandler(handle_dev_callback, pattern=r"^dev:"))
+    app.add_handler(CallbackQueryHandler(handle_agenttask_callback, pattern=r"^agt:"))
     app.add_handler(CallbackQueryHandler(handle_completion_callback, pattern=r"^(close:|closeall:|cancel$)"))
 
     _reschedule_briefing(app)

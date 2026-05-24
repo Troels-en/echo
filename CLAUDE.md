@@ -63,6 +63,9 @@ Then the user messages their bot `/start` on Telegram. Confirm it responds.
 
 ---
 
+## Email safety policy (hard rule)
+Echo may **auto-send email ONLY to the owner themselves** (`gcal.send_self`, no recipient arg). Email to **anyone else is draft-only** (`gcal.draft_email` → creates a Gmail draft, never sends; owner reviews + sends manually). Never add an auto-send path with an arbitrary recipient.
+
 ## Repo conventions
 - **Secrets** live in `.env` and `secrets/` — both gitignored. Never commit or echo them.
 - **Personal config** (`config/vaults.yml`, `config/interests.yml`) is gitignored; only `*.example.yml` ships.

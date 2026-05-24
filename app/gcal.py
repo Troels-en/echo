@@ -19,7 +19,8 @@ CREDS = ROOT / "secrets" / "google_credentials.json"
 SCOPES = [
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.send",     # send — ONLY to self (send_self)
+    "https://www.googleapis.com/auth/gmail.compose",  # drafts — outreach to others (draft_email)
 ]
 TZ = ZoneInfo("Europe/Berlin")
 
@@ -53,21 +54,39 @@ def _gmail():
     return build("gmail", "v1", credentials=_creds(), cache_discovery=False)
 
 
-def send_self(subject: str, body: str, html: bool = False) -> None:
-    """Email the authenticated user (themselves). Needs the gmail.send scope —
-    if missing, re-run scripts/google_auth.py to re-consent."""
+def _own_address(svc) -> str:
+    return svc.users().getProfile(userId="me").execute()["emailAddress"]
+
+
+def _build_raw(to: str, subject: str, body: str, html: bool) -> str:
     import base64
     from email.mime.text import MIMEText
-
-    svc = _gmail()
-    addr = svc.users().getProfile(userId="me").execute()["emailAddress"]
     mime = MIMEText(body, "html" if html else "plain", "utf-8")
-    mime["to"] = addr
-    mime["from"] = addr
+    mime["to"] = to
     mime["subject"] = subject
-    raw = base64.urlsafe_b64encode(mime.as_bytes()).decode()
+    return base64.urlsafe_b64encode(mime.as_bytes()).decode()
+
+
+def send_self(subject: str, body: str, html: bool = False) -> None:
+    """SEND an email — ONLY ever to the authenticated user themselves. There is
+    intentionally no recipient argument: Echo may auto-send to YOU, never to others.
+    For anyone else use draft_email() (creates a draft, never sends). Needs gmail.send."""
+    svc = _gmail()
+    addr = _own_address(svc)
+    raw = _build_raw(addr, subject, body, html)
     svc.users().messages().send(userId="me", body={"raw": raw}).execute()
     log.info("gmail sent to self: %s", subject)
+
+
+def draft_email(to: str, subject: str, body: str, html: bool = False) -> str:
+    """Create a DRAFT to anyone (never sends). Safety policy: outreach to others is
+    draft-only; the user reviews + sends manually in Gmail. Needs gmail.compose.
+    Returns the draft id."""
+    svc = _gmail()
+    raw = _build_raw(to, subject, body, html)
+    draft = svc.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
+    log.info("gmail draft created for %s: %s", to, subject)
+    return draft.get("id", "")
 
 
 def _header(payload: dict, name: str) -> str:

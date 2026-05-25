@@ -16,6 +16,7 @@ log = logging.getLogger(__name__)
 
 HABITS_VAULT = Path(os.path.expanduser(os.getenv("HABITS_VAULT_ROOT", "~/Habits_Vault"))).resolve()
 _ROUTINE = HABITS_VAULT / "01_Routines" / "Master Routine.md"
+_TRACKED = HABITS_VAULT / "01_Routines" / "Tracked-Habits.md"
 _LOGS = HABITS_VAULT / "06_Logs"
 
 _FALLBACK_MORNING = "Rolladen auf → Wasser + Supplements → 90 Sek Cat-Cow + Bird-Dog → Frühstück."
@@ -38,13 +39,33 @@ def _bad_day_minimum() -> tuple[str, str]:
     return morning, evening
 
 
+def _daily_habits() -> str:
+    """Pull the 'Tägliche Kern-Habits' block from Tracked-Habits — the full daily set, so the
+    nudge can show options beyond the bad-day floor (user wants to see everything on free days)."""
+    try:
+        text = _TRACKED.read_text(encoding="utf-8", errors="ignore")
+        m = re.search(r"##\s*T[äa]gliche Kern-Habits[^\n]*\n(.*?)(?:\n##\s|\Z)", text, re.DOTALL)
+        if m:
+            lines = [ln.strip() for ln in m.group(1).splitlines() if ln.strip().startswith("-")]
+            if lines:
+                return "\n".join(lines)
+    except Exception as ex:
+        log.warning("could not read Tracked-Habits: %s", ex)
+    return ""
+
+
 def morning_text() -> str:
     morning, _ = _bad_day_minimum()
-    return (
-        "☀️ *Guten Morgen.*\n"
-        f"Bad-day-Minimum: {morning}\n\n"
-        "Worauf willst du dich heute fokussieren? (1 Sache reicht.)"
-    )
+    full = _daily_habits()
+    parts = [
+        "☀️ *Guten Morgen.*",
+        "",
+        f"*Bad-day-Minimum* (zählt immer):\n{morning}",
+    ]
+    if full:
+        parts.append(f"\n*Volle Habits* (wenn du Zeit + Energie hast):\n{full}")
+    parts.append("\nWorauf willst du dich heute fokussieren? Eine Sache reicht, mehr ist Bonus.")
+    return "\n".join(parts)
 
 
 def evening_text() -> str:

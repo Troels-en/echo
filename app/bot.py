@@ -172,6 +172,7 @@ def _reschedule_briefing(app) -> None:
         _briefing_job,
         time=dtime(hour=hh, minute=mm, tzinfo=ZoneInfo("Europe/Berlin")),
         name="daily_briefing",
+        job_kwargs={"misfire_grace_time": 3600},
     )
     log.info("daily briefing scheduled for %02d:%02d", hh, mm)
 
@@ -1992,10 +1993,13 @@ def main() -> None:
     )
     # Proactive habit nudges (Habits_Vault-grounded). Toggle via state "proactive_enabled".
     _tz = _ZoneInfo("Europe/Berlin")
+    # misfire_grace_time: still fire if the loop was briefly busy at the exact time (default ~1s
+    # silently drops it). The catch_up_tick is the wider net; this keeps the on-time job forgiving.
+    _grace = {"misfire_grace_time": 3600}
     app.job_queue.run_daily(_morning_nudge_job, time=_dtime(hour=8, minute=0, tzinfo=_tz),
-                            name="morning_nudge")
+                            name="morning_nudge", job_kwargs=_grace)
     app.job_queue.run_daily(_evening_nudge_job, time=_dtime(hour=21, minute=30, tzinfo=_tz),
-                            name="evening_nudge")
+                            name="evening_nudge", job_kwargs=_grace)
     # Safety net for briefing/nudges missed because the Mac slept (or the process was down) at the
     # scheduled time — APScheduler does not retro-fire. Re-checks every 20 min, date-guarded.
     app.job_queue.run_repeating(_catch_up_tick, interval=1200, first=8, name="catch_up_tick")

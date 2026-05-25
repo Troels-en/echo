@@ -1,0 +1,43 @@
+name: Echo basics nudge
+
+# Off-Mac safety net: sends a BASIC morning/evening Telegram ping even when the Mac (and the
+# local Echo bot) is asleep or off. The full, personalized habit nudge + check-in logging still
+# come from the Mac bot when it is awake — this is just a best-effort reminder.
+#
+# GitHub Actions cron is UTC-only (no timezone) and best-effort (can lag 5-15 min or skip under
+# load). The UTC times below match Europe/Berlin in SUMMER (CEST, UTC+2); in winter (CET, UTC+1)
+# they land 1h early. The morning-vs-evening message is chosen from the real Berlin hour, so the
+# text is always correct even if the fire time drifts.
+#
+# Requires two repo secrets (Settings -> Secrets and variables -> Actions -> New repository secret):
+#   TELEGRAM_BOT_TOKEN  — the BotFather token (same as in .env)
+#   TELEGRAM_CHAT_ID    — your Telegram user id (6508582885)
+
+on:
+  schedule:
+    - cron: "0 6 * * *"    # 08:00 Europe/Berlin (CEST)
+    - cron: "30 19 * * *"  # 21:30 Europe/Berlin (CEST)
+  workflow_dispatch: {}    # lets you trigger it manually to test
+
+jobs:
+  nudge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send basic Telegram nudge
+        env:
+          BOT: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -z "$BOT" ] || [ -z "$CHAT" ]; then
+            echo "Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID secret; skipping."
+            exit 0
+          fi
+          HOUR=$(TZ=Europe/Berlin date +%H)
+          if [ "$HOUR" -lt 12 ]; then
+            TEXT="☀️ Guten Morgen. (Cloud-Ping, falls der Mac noch schläft) Worauf willst du dich heute fokussieren? Der volle Habit-Nudge kommt vom Mac, sobald er wach ist."
+          else
+            TEXT="🌙 Tagesabschluss. (Cloud-Ping, falls der Mac aus ist) Wie lief dein Tag? Sag's Echo, sobald der Mac wieder läuft, dann wird es geloggt."
+          fi
+          curl -sS -X POST "https://api.telegram.org/bot${BOT}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT}" \
+            --data-urlencode "text=${TEXT}"

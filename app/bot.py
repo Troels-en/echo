@@ -1360,28 +1360,32 @@ async def _morning_nudge_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         log.exception("morning nudge failed: %s", e)
 
 
-async def _catch_up_morning(ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Runs shortly after startup. If the Mac/bot was asleep at the scheduled time, daily jobs do
-    NOT fire retroactively — so send today's briefing/nudge now, but only in the morning window so
-    a 'Guten Morgen' never lands in the afternoon. Date-guarded against double-send."""
+async def _catch_up_tick(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Periodic safety net (runs every ~20 min). Daily jobs are SKIPPED if the Mac slept — or the
+    process was down — through their fire time (APScheduler misfire grace is ~1s). This tick
+    re-sends any of today's briefing / morning nudge / evening check-in that is past-due-but-unsent,
+    each only inside its own time window and date-guarded so it goes out at most once per day."""
     from datetime import date, datetime
     from zoneinfo import ZoneInfo
     now = datetime.now(ZoneInfo("Europe/Berlin"))
     today = date.today().isoformat()
-    if now.hour >= 12:  # only catch up morning items in the morning
-        return
     st = state_mod.load()
     if not st.get("chat_id"):
         return
-    bh, bm = (int(x) for x in st.get("briefing_time", "07:30").split(":"))
-    if (st.get("briefing_enabled") and st.get("last_briefing_sent") != today
-            and (now.hour, now.minute) >= (bh, bm)):
-        log.info("catch-up: missed daily briefing, sending now")
-        await _briefing_job(ctx)
-    if (st.get("proactive_enabled", True) and st.get("last_morning_nudge_sent") != today
-            and now.hour >= 8):
-        log.info("catch-up: missed morning nudge, sending now")
-        await _morning_nudge_job(ctx)
+    if now.hour < 12:  # morning window: briefing + morning nudge
+        bh, bm = (int(x) for x in st.get("briefing_time", "07:30").split(":"))
+        if (st.get("briefing_enabled") and st.get("last_briefing_sent") != today
+                and (now.hour, now.minute) >= (bh, bm)):
+            log.info("catch-up: missed daily briefing, sending now")
+            await _briefing_job(ctx)
+        if (st.get("proactive_enabled", True) and st.get("last_morning_nudge_sent") != today
+                and now.hour >= 8):
+            log.info("catch-up: missed morning nudge, sending now")
+            await _morning_nudge_job(ctx)
+    elif (now.hour, now.minute) >= (21, 30):  # evening window: 21:30 to midnight
+        if st.get("proactive_enabled", True) and st.get("last_evening_nudge_sent") != today:
+            log.info("catch-up: missed evening nudge, sending now")
+            await _evening_nudge_job(ctx)
 
 
 async def _evening_nudge_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1391,8 +1395,10 @@ async def _evening_nudge_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     try:
         import time as _t
+        from datetime import date
         state_mod.set_key("pending_habit_checkin_ts", _t.time())
         await ctx.bot.send_message(chat, proactive_mod.evening_text(), parse_mode="Markdown")
+        state_mod.set_key("last_evening_nudge_sent", date.today().isoformat())
     except Exception as e:
         log.exception("evening nudge failed: %s", e)
 
@@ -1990,8 +1996,9 @@ def main() -> None:
                             name="morning_nudge")
     app.job_queue.run_daily(_evening_nudge_job, time=_dtime(hour=21, minute=30, tzinfo=_tz),
                             name="evening_nudge")
-    # Catch up a briefing/nudge missed because the Mac/bot was asleep at the scheduled time.
-    app.job_queue.run_once(_catch_up_morning, when=8, name="catch_up_morning")
+    # Safety net for briefing/nudges missed because the Mac slept (or the process was down) at the
+    # scheduled time — APScheduler does not retro-fire. Re-checks every 20 min, date-guarded.
+    app.job_queue.run_repeating(_catch_up_tick, interval=1200, first=8, name="catch_up_tick")
 
     log.info("Echo bot starting...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

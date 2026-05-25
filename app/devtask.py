@@ -16,10 +16,11 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+from . import interactive
+
 log = logging.getLogger(__name__)
 
 DEV_ROOT = Path(os.path.expanduser(os.getenv("DEV_ROOT", "~"))).resolve()
-_CLAUDE_BIN = "claude"
 
 
 def _slug(s: str) -> str:
@@ -50,47 +51,31 @@ def _git(repo: Path, *args: str, timeout: int = 60) -> subprocess.CompletedProce
                           capture_output=True, text=True, timeout=timeout)
 
 
-_TASK_PROMPT = """You are an autonomous coding agent working inside this git repository.
-Implement the following request on the CURRENT branch (already created for you). Rules:
-- Make the smallest correct change. Match existing style. Do not push.
-- If you add/run code, verify it compiles/tests where feasible.
-- When done, end with a 3-5 line summary: what you changed, files touched, how to verify.
-
-REQUEST:
-{task}"""
-
-
-def run_devtask(repo: Path, task: str, timeout: int = 1800) -> dict:
-    """Create a branch, run the claude agent, commit. Returns {branch, report, changed, error}."""
+def run_devtask(repo: Path, task: str, session_id: str = "", answers: str = "",
+                timeout: int = 1800) -> dict:
+    """Create a branch, run the agent (resuming the plan session if given), commit, then always
+    restore the original branch. Returns {branch, base, report, changed, committed, error}."""
     orig = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() or "main"
     branch = f"echo/dev-{datetime.now():%Y%m%d-%H%M%S}"
     co = _git(repo, "checkout", "-b", branch)
     if co.returncode != 0:
         return {"error": f"git branch failed: {co.stderr[-300:]}"}
 
-    cmd = [
-        _CLAUDE_BIN, "-p", _TASK_PROMPT.format(task=task),
-        "--permission-mode", "acceptEdits",
-        "--allowedTools", "Read", "Write", "Edit", "Bash", "Glob", "Grep",
-        "--output-format", "text",
-    ]
-    log.info("devtask: claude agent in %s on %s", repo, branch)
+    log.info("devtask: agent in %s on %s (resume=%s)", repo, branch, bool(session_id))
     try:
-        res = subprocess.run(cmd, cwd=str(repo), capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return {"branch": branch, "error": f"Agent-Timeout nach {timeout}s (Branch {branch} bleibt zum Prüfen)."}
-    report = (res.stdout or "").strip()
-    if res.returncode != 0:
-        report += f"\n[agent exit {res.returncode}: {res.stderr[-200:]}]"
+        res = interactive.execute(interactive.DEVTASK, session_id, answers, repo, timeout)
+        report = res.get("report", "")
+        if res.get("error"):
+            report = f"{report}\n[{res['error']}]".strip()
 
-    _git(repo, "add", "-A")
-    commit = _git(repo, "commit", "-m", f"echo devtask: {task[:60]}")
-    committed = commit.returncode == 0
-    changed = _git(repo, "diff", "--stat", "HEAD~1", "HEAD").stdout.strip() if committed else "(keine Änderungen committet)"
-
-    # Return the repo to where it was — the work stays on `branch`, retrievable for review.
-    # Critical when the target is a live repo (e.g. echo_vault itself).
-    _git(repo, "checkout", orig)
-
-    return {"branch": branch, "base": orig, "report": report[-2500:],
-            "changed": changed, "committed": committed, "error": ""}
+        _git(repo, "add", "-A")
+        commit = _git(repo, "commit", "-m", f"echo devtask: {task[:60]}")
+        committed = commit.returncode == 0
+        changed = (_git(repo, "diff", "--stat", "HEAD~1", "HEAD").stdout.strip()
+                   if committed else "(keine Änderungen committet)")
+        return {"branch": branch, "base": orig, "report": report[-2500:],
+                "changed": changed, "committed": committed, "error": res.get("error", "")}
+    finally:
+        # Always return the repo to where it was — the work stays on `branch`, retrievable for
+        # review. Critical when the target is a live repo (e.g. echo_vault itself).
+        _git(repo, "checkout", orig)

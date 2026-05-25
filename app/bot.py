@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -23,7 +24,7 @@ from .transcribe import transcribe, TranscribeError
 from .vault import classify, write_note, write_answer_note, vault_todoist_config, find_related
 from .llm import LLMError
 from . import todoist as td
-from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod, tts as tts_mod, shortterm as shortterm_mod, secondbrain as secondbrain_mod, jobs as jobs_mod, proactive as proactive_mod, devtask as devtask_mod, notionsync as notionsync_mod, agenttask as agenttask_mod, transcript as transcript_mod
+from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod, tts as tts_mod, shortterm as shortterm_mod, secondbrain as secondbrain_mod, jobs as jobs_mod, proactive as proactive_mod, devtask as devtask_mod, notionsync as notionsync_mod, agenttask as agenttask_mod, transcript as transcript_mod, interactive as interactive_mod
 
 log = logging.getLogger(__name__)
 
@@ -93,6 +94,18 @@ async def _safe_reply_kb(msg, text: str, kb) -> None:
             raise
 
 
+async def _safe_edit_kb(message, text: str, kb) -> None:
+    """edit_text with an inline keyboard; plain-text fallback (keeping buttons) on entity-parse reject."""
+    from telegram.error import BadRequest
+    try:
+        await message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    except BadRequest as e:
+        if "entit" in str(e).lower() or "parse" in str(e).lower():
+            await message.edit_text(text, reply_markup=kb)
+        else:
+            raise
+
+
 async def cmd_start(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     chat_id = update.effective_chat.id if update.effective_chat else None
@@ -134,6 +147,7 @@ async def cmd_briefingtime(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def _briefing_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    from datetime import date
     cfg: Config = ctx.application.bot_data["cfg"]
     st = state_mod.load()
     if not st.get("briefing_enabled") or not st.get("chat_id"):
@@ -141,6 +155,7 @@ async def _briefing_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         text = await asyncio.to_thread(briefing_mod.build_briefing, cfg)
         await ctx.bot.send_message(st["chat_id"], text, parse_mode="Markdown")
+        state_mod.set_key("last_briefing_sent", date.today().isoformat())
     except Exception as e:
         log.exception("scheduled briefing failed: %s", e)
 
@@ -220,6 +235,9 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     ogg_path = cfg.data_dir / "audio" / f"{work_id}.ogg"
     progress = await msg.reply_text("📥 Empfangen, lade runter...")
 
+    transcript = ""
+    classification = None
+    outcome = ""
     try:
         tg_file = await voice.get_file()
         await tg_file.download_to_drive(custom_path=str(ogg_path))
@@ -236,6 +254,11 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await progress.edit_text("⚠️ Leere Transkription.")
             return
 
+        # If a clarify dialog is awaiting answers, this voice note IS the answer — not a new request.
+        if await _consume_dialog_answer(transcript, msg, ctx):
+            await progress.delete()
+            return
+
         await progress.edit_text(f"🧠 Verstehe...\n\n_{transcript[:200]}_", parse_mode="Markdown")
         # Single LLM call: intent + (if note) classification, with recent-conversation context
         history = shortterm_mod.recent_text()
@@ -243,8 +266,9 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         intent = classification.get("intent", "note")
         log.info("voice intent: %s", intent)
         _log_event(intent, classification, transcript, "voice")
-        transcript_mod.record("voice", transcript, classification)
         shortterm_mod.add("user", transcript)
+        if intent in ("devtask", "agenttask"):
+            outcome = f"{intent}: Bestätigung angefragt"
         if intent == "query":
             await progress.delete()
             await _answer_query(transcript, cfg, msg, history)
@@ -302,6 +326,7 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         note_path = await asyncio.to_thread(
             write_note, transcript, classification, cfg, tasks=tasks, related=related,
         )
+        outcome = f"note -> {note_path.name}" + (f" (+{len(tasks)} Task)" if tasks else "")
 
         # Index into vector store for RAG
         try:
@@ -326,11 +351,16 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await _maybe_answer_followup(classification, cfg, msg, history)
     except (TranscribeError, LLMError) as e:
         log.exception("voice handler failed")
+        outcome = f"error: {e}"
         await progress.edit_text(f"❌ Fehler: {e}")
     except Exception as e:
         log.exception("unexpected error")
+        outcome = f"error: {e}"
         await progress.edit_text(f"❌ Unerwarteter Fehler: {e}")
     finally:
+        if transcript.strip():
+            intent = classification.get("intent") if classification else None
+            transcript_mod.record("voice", transcript, classification, outcome or (f"-> {intent}" if intent else ""))
         for p in [ogg_path, ogg_path.with_suffix(".wav")]:
             p.unlink(missing_ok=True)
 
@@ -698,12 +728,67 @@ async def cmd_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _answer_ask(question, cfg, update.message)
 
 
-def _pending_devtasks(ctx) -> dict:
-    return ctx.application.bot_data.setdefault("pending_devtasks", {})
+# --- Interactive devtask / agenttask -----------------------------------------------------------
+# Flow: classify -> read-only PLAN pass (sees what already exists, decides if clarifying questions
+# are needed) -> ask via Telegram -> user answers (1 free-text round) -> confirm -> RESUME the same
+# claude session to execute. Single-user, so one dialog slot at a time makes the answer-intercept
+# in handle_text/handle_voice unambiguous.
+_DIALOG_TTL = 2 * 3600  # awaiting-answers expires after 2h
+
+
+def _dialog(ctx) -> dict | None:
+    return ctx.application.bot_data.get("active_dialog")
+
+
+def _set_dialog(ctx, d: dict) -> None:
+    ctx.application.bot_data["active_dialog"] = d
+
+
+def _clear_dialog(ctx) -> None:
+    ctx.application.bot_data.pop("active_dialog", None)
+
+
+def _confirm_kb(token: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Ausführen", callback_data=f"go:{token}"),
+        InlineKeyboardButton("✗ Abbrechen", callback_data="cancel"),
+    ]])
+
+
+def _format_questions(d: dict) -> str:
+    lines = []
+    if d.get("existing_work"):
+        lines.append(f"📂 Schon da: {d['existing_work']}")
+    if d.get("plan"):
+        lines.append(f"📝 Plan: {d['plan']}")
+    lines.append("")
+    lines.append("❓ Bevor ich loslege:")
+    for i, q in enumerate(d.get("questions") or [], 1):
+        choices = q.get("choices") or []
+        suffix = f"  ({' / '.join(choices)})" if choices else ""
+        lines.append(f"{i}. {q.get('question', '')}{suffix}")
+    lines.append("")
+    lines.append("_Antworte einfach frei (alle Fragen in einer Nachricht). Oder /cancel._")
+    return "\n".join(lines)
+
+
+def _format_confirm(d: dict) -> str:
+    head = "🛠️ *Dev-Task*" if d["kind"] == "devtask" else "🤖 *Aufgabe*"
+    lines = [head]
+    if d["kind"] == "devtask" and d.get("repo"):
+        lines.append(f"📁 `{Path(d['repo']).name}` — neuer Branch, kein Push (reviewbar)")
+    if d.get("existing_work"):
+        lines.append(f"📂 Schon da: {d['existing_work']}")
+    lines.append(f"📝 {d.get('plan') or d['task']}")
+    if d.get("answers"):
+        lines.append(f"💬 Deine Vorgabe: {d['answers'].strip()}")
+    lines.append("")
+    lines.append("Ausführen?")
+    return "\n".join(lines)
 
 
 async def _present_devtask(classification: dict, cfg: Config, msg, ctx) -> None:
-    """Confirmation gate before Echo triggers a Claude Code agent on a repo."""
+    """Start the interactive plan -> clarify -> confirm dialog for a code task."""
     repo_hint = (classification.get("dev_repo") or "").strip()
     task = (classification.get("dev_task") or "").strip()
     if not task:
@@ -715,41 +800,122 @@ async def _present_devtask(classification: dict, cfg: Config, msg, ctx) -> None:
             f"🛠️ Projekt '{repo_hint}' nicht als Git-Repo unter `{devtask_mod.DEV_ROOT}` gefunden. "
             "Welches Projekt genau?", parse_mode="Markdown")
         return
+    await _start_task_dialog(ctx, msg, "devtask", task, repo=str(repo))
+
+
+async def _present_agenttask(classification: dict, cfg: Config, msg, ctx) -> None:
+    """Start the interactive plan -> clarify -> confirm dialog for a general executor task."""
+    task = (classification.get("agent_task") or "").strip()
+    if not task:
+        await msg.reply_text("🤖 Was genau soll ich ausführen (z.B. 'zieh meine Notion-Habits in den Vault')?")
+        return
+    await _start_task_dialog(ctx, msg, "agenttask", task)
+
+
+async def _start_task_dialog(ctx, msg, kind: str, task: str, repo: str | None = None) -> None:
+    """Concurrency-gate, then kick off the read-only PLAN pass in the background."""
+    existing = _dialog(ctx)
+    if existing and existing.get("state") in ("planning", "awaiting_answers", "awaiting_confirm"):
+        await msg.reply_text("Erst die aktuelle Aufgabe abschließen oder /cancel.")
+        return
     token = uuid4().hex[:8]
-    _pending_devtasks(ctx)[token] = {"repo": str(repo), "task": task}
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Claude Code starten", callback_data=f"dev:{token}"),
-        InlineKeyboardButton("✗ Abbrechen", callback_data="cancel"),
-    ]])
-    await _safe_reply_kb(
-        msg,
-        f"🛠️ *Dev-Task*\n📁 `{repo.name}` — neuer Branch, kein Push (reviewbar)\n📝 {task}\n\n"
-        "Claude Code starten?",
-        kb)
+    label = "🛠️ Plane Dev-Task" if kind == "devtask" else "🤖 Plane Aufgabe"
+    prog = await msg.reply_text(f"{label} — schaue erst, was schon da ist...")
+    _set_dialog(ctx, {
+        "token": token, "kind": kind, "task": task, "repo": repo,
+        "state": "planning", "session_id": "", "questions": [], "answers": "",
+        "plan": "", "existing_work": "", "recommended_default": "", "created_ts": time.time(),
+    })
+    asyncio.create_task(_run_plan_bg(ctx, token, kind, task, repo, prog))
 
 
-async def handle_dev_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+async def _run_plan_bg(ctx, token: str, kind: str, task: str, repo: str | None, prog) -> None:
+    try:
+        if kind == "devtask":
+            res = await asyncio.to_thread(interactive_mod.plan, interactive_mod.DEVTASK, task, Path(repo))
+        else:
+            res = await asyncio.to_thread(interactive_mod.plan, interactive_mod.AGENTTASK, task, interactive_mod.HOME)
+    except Exception as e:
+        log.exception("plan bg failed")
+        _clear_dialog(ctx)
+        await _safe_edit(prog, f"❌ Planung fehlgeschlagen: {e}")
+        return
+    d = _dialog(ctx)
+    if not d or d.get("token") != token:
+        return  # cancelled or superseded while planning
+    if res.get("error"):
+        _clear_dialog(ctx)
+        await _safe_edit(prog, f"⚠️ Planung: {res['error']}")
+        return
+    d["session_id"] = res.get("session_id", "")
+    d["plan"] = res.get("plan", "")
+    d["existing_work"] = res.get("existing_work", "")
+    d["questions"] = res.get("questions") or []
+    d["recommended_default"] = res.get("recommended_default", "")
+    if d["questions"]:
+        d["state"] = "awaiting_answers"
+        _set_dialog(ctx, d)
+        await _safe_edit(prog, _format_questions(d))
+    else:
+        d["state"] = "awaiting_confirm"
+        _set_dialog(ctx, d)
+        await _safe_edit_kb(prog, _format_confirm(d), _confirm_kb(token))
+
+
+async def _consume_dialog_answer(text: str, msg, ctx) -> bool:
+    """If a clarify dialog is awaiting answers, treat this message as the answer batch and move to
+    confirmation. Returns True if consumed (caller must skip normal classification)."""
+    d = _dialog(ctx)
+    if not d or d.get("state") != "awaiting_answers":
+        return False
+    if time.time() - d.get("created_ts", 0) > _DIALOG_TTL:
+        _clear_dialog(ctx)
+        await msg.reply_text("Dialog abgelaufen — schick die Aufgabe nochmal.")
+        return True
+    d["answers"] = f"{d.get('answers', '')}\n{text}".strip()
+    d["state"] = "awaiting_confirm"
+    _set_dialog(ctx, d)
+    await _safe_reply_kb(msg, _format_confirm(d), _confirm_kb(d["token"]))
+    return True
+
+
+async def handle_interactive_go(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
     token = q.data.split(":", 1)[1]
-    pend = _pending_devtasks(ctx).pop(token, None)
-    if not pend:
-        await q.edit_message_text("Dev-Task abgelaufen.")
+    d = _dialog(ctx)
+    if not d or d.get("token") != token:
+        await q.edit_message_text("Aufgabe abgelaufen.")
         return
-    repo = Path(pend["repo"])
+    kind = d["kind"]
+    # free the dialog slot now — execution is fire-and-forget and asks nothing more
+    _clear_dialog(ctx)
+    icon = "🛠️" if kind == "devtask" else "🤖"
     await q.edit_message_text(
-        f"🛠️ Claude Code läuft in `{repo.name}` im Hintergrund — ich melde mich. "
-        "_Du kannst in der Zwischenzeit weiter fragen._", parse_mode="Markdown")
-    jid = jobs_mod.start("devtask", repo.name)
-    asyncio.create_task(_run_devtask_bg(repo, pend["task"], q.message, jid))
+        f"{icon} Läuft im Hintergrund — ich melde mich. _Du kannst weiter fragen._",
+        parse_mode="Markdown")
+    n_q = len(d.get("questions") or [])
+    if kind == "devtask":
+        repo = Path(d["repo"])
+        jid = jobs_mod.start("devtask", repo.name)
+        asyncio.create_task(_run_devtask_bg(repo, d["task"], q.message, jid,
+                                            session_id=d["session_id"], answers=d["answers"], n_q=n_q))
+    else:
+        jid = jobs_mod.start("agenttask", d["task"][:60])
+        asyncio.create_task(_run_agenttask_bg(d["task"], q.message, jid,
+                                              session_id=d["session_id"], answers=d["answers"], n_q=n_q))
 
 
-async def _run_devtask_bg(repo: Path, task: str, msg, jid: int | None = None) -> None:
+async def _run_devtask_bg(repo: Path, task: str, msg, jid: int | None = None,
+                          session_id: str = "", answers: str = "", n_q: int = 0) -> None:
+    outcome = "fertig"
     try:
-        res = await asyncio.to_thread(devtask_mod.run_devtask, repo, task)
+        res = await asyncio.to_thread(devtask_mod.run_devtask, repo, task, session_id, answers)
         if res.get("error"):
+            outcome = f"error: {res['error']}"
             await msg.reply_text(f"⚠️ Dev-Task: {res['error']}")
             return
+        outcome = f"fertig: branch {res['branch']} (geklärt: {n_q} Fragen)"
         out = (f"🛠️ Fertig in `{repo.name}` (Branch `{res['branch']}`).\n\n"
                f"*Geändert:*\n{res.get('changed', '') or '(nichts)'}\n\n"
                f"{res.get('report', '')[:1200]}\n\n"
@@ -757,62 +923,41 @@ async def _run_devtask_bg(repo: Path, task: str, msg, jid: int | None = None) ->
         await _safe_reply(msg, out)
     except Exception as e:
         log.exception("devtask bg failed")
+        outcome = f"error: {e}"
         await msg.reply_text(f"❌ Dev-Task-Fehler: {e}")
     finally:
+        transcript_mod.record("devtask:run", f"{repo.name}: {task}", None, outcome)
         if jid is not None:
             jobs_mod.finish(jid)
 
 
-def _pending_agenttasks(ctx) -> dict:
-    return ctx.application.bot_data.setdefault("pending_agenttasks", {})
-
-
-async def _present_agenttask(classification: dict, cfg: Config, msg, ctx) -> None:
-    """Confirmation gate before Echo runs a general executor agent on Notion/vaults/files."""
-    task = (classification.get("agent_task") or "").strip()
-    if not task:
-        await msg.reply_text("🤖 Was genau soll ich ausführen (z.B. 'zieh meine Notion-Habits in den Vault')?")
-        return
-    token = uuid4().hex[:8]
-    _pending_agenttasks(ctx)[token] = {"task": task}
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Ausführen", callback_data=f"agt:{token}"),
-        InlineKeyboardButton("✗ Abbrechen", callback_data="cancel"),
-    ]])
-    await _safe_reply_kb(
-        msg,
-        f"🤖 *Aufgabe ausführen* (Notion + Vaults, additiv/non-destruktiv)\n📝 {task}\n\nStarten?",
-        kb)
-
-
-async def handle_agenttask_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    q = update.callback_query
-    await q.answer()
-    token = q.data.split(":", 1)[1]
-    pend = _pending_agenttasks(ctx).pop(token, None)
-    if not pend:
-        await q.edit_message_text("Aufgabe abgelaufen.")
-        return
-    await q.edit_message_text(
-        "🤖 Läuft im Hintergrund — ich melde mich mit dem Ergebnis. "
-        "_Du kannst weiter fragen._", parse_mode="Markdown")
-    jid = jobs_mod.start("agenttask", pend["task"][:60])
-    asyncio.create_task(_run_agenttask_bg(pend["task"], q.message, jid))
-
-
-async def _run_agenttask_bg(task: str, msg, jid: int | None = None) -> None:
+async def _run_agenttask_bg(task: str, msg, jid: int | None = None,
+                            session_id: str = "", answers: str = "", n_q: int = 0) -> None:
+    outcome = f"fertig (geklärt: {n_q} Fragen)"
     try:
-        res = await asyncio.to_thread(agenttask_mod.run_agenttask, task)
+        res = await asyncio.to_thread(agenttask_mod.run_agenttask, task, session_id, answers)
         if res.get("error"):
+            outcome = f"error: {res['error']}"
             await msg.reply_text(f"⚠️ Aufgabe: {res['error']}\n\n{res.get('report','')[:800]}")
             return
         await _safe_reply(msg, f"🤖 *Fertig.*\n\n{res.get('report', '')[:1800]}")
     except Exception as e:
         log.exception("agenttask bg failed")
+        outcome = f"error: {e}"
         await msg.reply_text(f"❌ Aufgabe-Fehler: {e}")
     finally:
+        transcript_mod.record("agenttask:run", task, None, outcome)
         if jid is not None:
             jobs_mod.finish(jid)
+
+
+async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Abort a pending interactive devtask/agenttask dialog."""
+    if _dialog(ctx):
+        _clear_dialog(ctx)
+        await update.message.reply_text("Abgebrochen.")
+    else:
+        await update.message.reply_text("Nichts offen zum Abbrechen.")
 
 
 _ACTION_INTENTS = {"podcast", "overview", "stats", "synthesize", "draft", "finddoc", "mailme"}
@@ -895,6 +1040,10 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not text:
         return
 
+    # If a clarify dialog is awaiting answers, this message IS the answer — handle before anything else.
+    if not text.startswith("/") and await _consume_dialog_answer(text, msg, ctx):
+        return
+
     # Evening habit check-in capture: if Echo just asked (within 4h), log this reply to the vault.
     import time as _t
     ck_ts = state_mod.load().get("pending_habit_checkin_ts")
@@ -917,49 +1066,58 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     intent = classification.get("intent", "note")
     log.info("text intent: %s for %r", intent, text[:80])
     _log_event(intent, classification, text, "text")
-    transcript_mod.record("text", text, classification)
     shortterm_mod.add("user", text)
+    outcome = ""
+    if intent in ("devtask", "agenttask"):
+        outcome = f"{intent}: Bestätigung angefragt"
 
-    if intent == "query":
-        await _answer_query(text, cfg, msg, history)
-        return
-    if intent == "complete":
-        await _present_completion_candidates(text, cfg, msg)
+    try:
+        if intent == "query":
+            await _answer_query(text, cfg, msg, history)
+            return
+        if intent == "complete":
+            await _present_completion_candidates(text, cfg, msg)
+            await _maybe_answer_followup(classification, cfg, msg, history)
+            return
+        if intent == "event":
+            await _present_event(classification, cfg, msg, ctx)
+            await _maybe_answer_followup(classification, cfg, msg, history)
+            return
+        if intent == "mail":
+            await _handle_mail(cfg, msg, ctx, text, classification)
+            return
+        if intent == "news":
+            await _send_news(cfg, msg)
+            return
+        if intent == "ask":
+            await _answer_ask(text, cfg, msg, history)
+            return
+        if intent == "status":
+            await msg.reply_text(jobs_mod.status_text())
+            return
+        if intent == "devtask":
+            await _present_devtask(classification, cfg, msg, ctx)
+            return
+        if intent == "agenttask":
+            await _present_agenttask(classification, cfg, msg, ctx)
+            return
+        if intent == "prioritize":
+            await _do_prioritize(text, cfg, msg)
+            return
+        if intent == "help":
+            await msg.reply_text(HELP_TEXT, parse_mode="Markdown")
+            return
+        if intent in _ACTION_INTENTS:
+            await _route_action(intent, text, update, ctx)
+            return
+        await _ingest_text(text, cfg, msg, classification=classification)
+        outcome = "note geschrieben"
         await _maybe_answer_followup(classification, cfg, msg, history)
-        return
-    if intent == "event":
-        await _present_event(classification, cfg, msg, ctx)
-        await _maybe_answer_followup(classification, cfg, msg, history)
-        return
-    if intent == "mail":
-        await _handle_mail(cfg, msg, ctx, text, classification)
-        return
-    if intent == "news":
-        await _send_news(cfg, msg)
-        return
-    if intent == "ask":
-        await _answer_ask(text, cfg, msg, history)
-        return
-    if intent == "status":
-        await msg.reply_text(jobs_mod.status_text())
-        return
-    if intent == "devtask":
-        await _present_devtask(classification, cfg, msg, ctx)
-        return
-    if intent == "agenttask":
-        await _present_agenttask(classification, cfg, msg, ctx)
-        return
-    if intent == "prioritize":
-        await _do_prioritize(text, cfg, msg)
-        return
-    if intent == "help":
-        await msg.reply_text(HELP_TEXT, parse_mode="Markdown")
-        return
-    if intent in _ACTION_INTENTS:
-        await _route_action(intent, text, update, ctx)
-        return
-    await _ingest_text(text, cfg, msg, classification=classification)
-    await _maybe_answer_followup(classification, cfg, msg, history)
+    except Exception as e:
+        outcome = f"error: {e}"
+        raise
+    finally:
+        transcript_mod.record("text", text, classification, outcome or f"-> {intent}")
 
 
 def _tasks_keyboard(tasks: list) -> InlineKeyboardMarkup | None:
@@ -1190,14 +1348,40 @@ async def _synthesis_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _morning_nudge_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    from datetime import date
     st = state_mod.load()
     chat = st.get("chat_id")
     if not st.get("proactive_enabled", True) or not chat:
         return
     try:
         await ctx.bot.send_message(chat, proactive_mod.morning_text(), parse_mode="Markdown")
+        state_mod.set_key("last_morning_nudge_sent", date.today().isoformat())
     except Exception as e:
         log.exception("morning nudge failed: %s", e)
+
+
+async def _catch_up_morning(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Runs shortly after startup. If the Mac/bot was asleep at the scheduled time, daily jobs do
+    NOT fire retroactively — so send today's briefing/nudge now, but only in the morning window so
+    a 'Guten Morgen' never lands in the afternoon. Date-guarded against double-send."""
+    from datetime import date, datetime
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("Europe/Berlin"))
+    today = date.today().isoformat()
+    if now.hour >= 12:  # only catch up morning items in the morning
+        return
+    st = state_mod.load()
+    if not st.get("chat_id"):
+        return
+    bh, bm = (int(x) for x in st.get("briefing_time", "07:30").split(":"))
+    if (st.get("briefing_enabled") and st.get("last_briefing_sent") != today
+            and (now.hour, now.minute) >= (bh, bm)):
+        log.info("catch-up: missed daily briefing, sending now")
+        await _briefing_job(ctx)
+    if (st.get("proactive_enabled", True) and st.get("last_morning_nudge_sent") != today
+            and now.hour >= 8):
+        log.info("catch-up: missed morning nudge, sending now")
+        await _morning_nudge_job(ctx)
 
 
 async def _evening_nudge_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1545,7 +1729,7 @@ async def handle_event_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
         await q.edit_message_text(f"❌ Konnte Termin nicht eintragen: {e}")
 
 
-async def handle_completion_callback(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_completion_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     if not q or not q.data:
         return
@@ -1553,7 +1737,8 @@ async def handle_completion_callback(update: Update, _ctx: ContextTypes.DEFAULT_
 
     if data == "cancel":
         await q.answer("Abgebrochen")
-        await q.edit_message_text("✗ Abgebrochen — nichts geschlossen.")
+        _clear_dialog(ctx)  # also abort any pending interactive devtask/agenttask dialog
+        await q.edit_message_text("✗ Abgebrochen.")
         return
 
     if data.startswith("close:"):
@@ -1777,6 +1962,7 @@ def main() -> None:
     app.add_handler(CommandHandler("synthesize", cmd_synthesize))
     app.add_handler(CommandHandler("prioritize", cmd_prioritize))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("voice", cmd_voice))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
@@ -1785,8 +1971,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_mail_callback, pattern=r"^(mailt:|maile:)"))
     app.add_handler(CallbackQueryHandler(handle_clean_callback, pattern=r"^clean:"))
     app.add_handler(CallbackQueryHandler(handle_move_callback, pattern=r"^mv:"))
-    app.add_handler(CallbackQueryHandler(handle_dev_callback, pattern=r"^dev:"))
-    app.add_handler(CallbackQueryHandler(handle_agenttask_callback, pattern=r"^agt:"))
+    app.add_handler(CallbackQueryHandler(handle_interactive_go, pattern=r"^go:"))
     app.add_handler(CallbackQueryHandler(handle_completion_callback, pattern=r"^(close:|closeall:|cancel$)"))
 
     _reschedule_briefing(app)
@@ -1805,6 +1990,8 @@ def main() -> None:
                             name="morning_nudge")
     app.job_queue.run_daily(_evening_nudge_job, time=_dtime(hour=21, minute=30, tzinfo=_tz),
                             name="evening_nudge")
+    # Catch up a briefing/nudge missed because the Mac/bot was asleep at the scheduled time.
+    app.job_queue.run_once(_catch_up_morning, when=8, name="catch_up_morning")
 
     log.info("Echo bot starting...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

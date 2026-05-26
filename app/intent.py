@@ -100,11 +100,16 @@ WHAT YOU KNOW ABOUT THE USER (their goals/projects — weight tasks that serve t
 
 USER'S STATED FOCUS RIGHT NOW (if any): {focus}
 
+CALENDAR — next 2 days (FIXED commitments, cannot be moved; they consume the day's time):
+{events}
+
 OPEN TASKS (content · due · todoist priority 1-4):
 {tasks}
 
 Rank by what truly matters now: hard deadlines first, then alignment with the user's goals,
 then todoist priority. A near deadline (today/this week) on something important beats everything.
+Treat calendar events as fixed blocks the user must show up for — call out a today event as a
+top item if it is imminent, and account for the time they eat when suggesting what to tackle.
 
 Return ONLY JSON:
 {{
@@ -116,11 +121,34 @@ Return ONLY JSON:
 Rank at most the top 6. Be decisive."""
 
 
+def _calendar_lines() -> list[str]:
+    """Today + next 2 days of calendar events, as fixed commitments for the ranker. Best-effort."""
+    try:
+        from datetime import timedelta
+        from . import gcal
+        cal = gcal._calendar()
+        now = datetime.now(timezone.utc)
+        r = cal.events().list(
+            calendarId="primary", timeMin=now.isoformat(),
+            timeMax=(now + timedelta(days=2)).isoformat(),
+            singleEvents=True, orderBy="startTime", maxResults=10,
+        ).execute()
+        out = []
+        for e in r.get("items", []):
+            st = e.get("start") or {}
+            out.append(f"- {e.get('summary', '(ohne Titel)')} · {st.get('dateTime') or st.get('date') or ''}")
+        return out
+    except Exception as e:
+        log.warning("rank: calendar fetch failed: %s", e)
+        return []
+
+
 def rank_tasks(cfg: Config, focus: str = "") -> str:
-    """Fetch open tasks and LLM-rank them by deadline + the user's goals (from memory)."""
+    """Fetch open tasks + calendar and LLM-rank by deadline + the user's goals (from memory)."""
     tasks = fetch_open_tasks(limit=60)
-    if not tasks:
-        return "✅ Keine offenen Tasks."
+    events = _calendar_lines()
+    if not tasks and not events:
+        return "✅ Keine offenen Tasks oder Termine."
     lines = []
     for t in tasks:
         due = t.get("due") or {}
@@ -130,7 +158,9 @@ def rank_tasks(cfg: Config, focus: str = "") -> str:
     try:
         r = call_json(
             RANK_PROMPT.format(now=now, memory=memory.context() or "(nichts bekannt)",
-                               focus=focus or "(nicht genannt)", tasks="\n".join(lines)),
+                               focus=focus or "(nicht genannt)",
+                               events="\n".join(events) or "(keine Termine)",
+                               tasks="\n".join(lines) or "(keine offenen Tasks)"),
             primary=cfg.llm_primary, fallback=cfg.llm_fallback,
         )
     except Exception as e:

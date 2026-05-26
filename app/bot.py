@@ -19,7 +19,7 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 
-from .config import Config
+from .config import Config, REPO_ROOT
 from .transcribe import transcribe, TranscribeError
 from .vault import classify, write_note, write_answer_note, vault_todoist_config, find_related
 from .llm import LLMError
@@ -917,11 +917,21 @@ async def _run_devtask_bg(repo: Path, task: str, msg, jid: int | None = None,
             await msg.reply_text(f"⚠️ Dev-Task: {res['error']}")
             return
         outcome = f"fertig: branch {res['branch']} (geklärt: {n_q} Fragen)"
-        out = (f"🛠️ Fertig in `{repo.name}` (Branch `{res['branch']}`).\n\n"
+        branch = res.get("branch", "")
+        is_self = repo.resolve() == REPO_ROOT.resolve() and res.get("committed") and branch
+        out = (f"🛠️ Fertig in `{repo.name}` (Branch `{branch}`).\n\n"
                f"*Geändert:*\n{res.get('changed', '') or '(nichts)'}\n\n"
-               f"{res.get('report', '')[:1200]}\n\n"
-               f"_Branch lokal zum Prüfen — kein Push. Merge wenn's passt._")
-        await _safe_reply(msg, out)
+               f"{res.get('report', '')[:1200]}\n\n")
+        if is_self:
+            out += ("⚠️ _Das ist Code an MIR selbst — wird erst live nach Merge + Neustart._")
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Mergen & neu starten", callback_data=f"applydev:{branch}"),
+                InlineKeyboardButton("✗ Lassen", callback_data="cancel"),
+            ]])
+            await _safe_reply_kb(msg, out, kb)
+        else:
+            out += "_Branch lokal zum Prüfen — kein Push. Merge wenn's passt._"
+            await _safe_reply(msg, out)
     except Exception as e:
         log.exception("devtask bg failed")
         outcome = f"error: {e}"
@@ -930,6 +940,41 @@ async def _run_devtask_bg(repo: Path, task: str, msg, jid: int | None = None,
         transcript_mod.record("devtask:run", f"{repo.name}: {task}", None, outcome)
         if jid is not None:
             jobs_mod.finish(jid)
+
+
+async def handle_applydev_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """One-tap apply for a devtask that edited Echo's OWN repo: merge the branch to main,
+    compile-check, then restart the bot detached so the self-fix goes live. Never restarts into a
+    broken import."""
+    q = update.callback_query
+    await q.answer()
+    branch = q.data.split(":", 1)[1]
+    repo = REPO_ROOT
+
+    def _g(*a):
+        return subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)
+
+    _g("checkout", "main")
+    mg = _g("merge", "--no-edit", branch)
+    if mg.returncode != 0:
+        _g("merge", "--abort")
+        await q.edit_message_text(f"❌ Merge fehlgeschlagen, nichts geändert:\n{mg.stderr[-300:]}")
+        return
+    py = str(repo / ".venv" / "bin" / "python")
+    chk = subprocess.run([py, "-c", "import app.bot"], cwd=str(repo), capture_output=True, text=True)
+    if chk.returncode != 0:
+        await q.edit_message_text(
+            f"⚠️ `{branch}` gemergt, aber Compile-Check fehlgeschlagen — NICHT neu gestartet, "
+            f"alter Bot läuft weiter. Fehler:\n{chk.stderr[-400:]}")
+        return
+    _g("branch", "-d", branch)
+    await q.edit_message_text(
+        f"✅ `{branch}` → main gemergt + kompiliert. Starte neu (~30s), dann bin ich mit dem Fix da.",
+        parse_mode="Markdown")
+    subprocess.Popen(
+        ["bash", "-c", f"sleep 3; pkill -9 -f 'app.bot'; sleep 2; cd '{repo}'; "
+         "nohup bash scripts/start.sh > /tmp/echo-bot.log 2>&1 &"],
+        start_new_session=True)
 
 
 async def _run_agenttask_bg(task: str, msg, jid: int | None = None,
@@ -1992,6 +2037,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_clean_callback, pattern=r"^clean:"))
     app.add_handler(CallbackQueryHandler(handle_move_callback, pattern=r"^mv:"))
     app.add_handler(CallbackQueryHandler(handle_interactive_go, pattern=r"^go:"))
+    app.add_handler(CallbackQueryHandler(handle_applydev_callback, pattern=r"^applydev:"))
     app.add_handler(CallbackQueryHandler(handle_completion_callback, pattern=r"^(close:|closeall:|cancel$)"))
 
     _reschedule_briefing(app)

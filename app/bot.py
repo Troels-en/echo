@@ -316,6 +316,10 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await progress.delete()
             await msg.reply_text(HELP_TEXT, parse_mode="Markdown")
             return
+        if intent == "resend":
+            await progress.delete()
+            await _resend_last(msg)
+            return
         if intent in _ACTION_INTENTS:
             await progress.delete()
             await _route_action(intent, transcript, update, ctx)
@@ -460,8 +464,10 @@ async def _deliver_ask(result: dict, question: str, cfg: Config, msg, progress=N
     except Exception as e:
         log.error("saving answer note failed: %s", e)
 
+    # importance (1..5) stays in the note's frontmatter for the weekly pruning job, but is NOT
+    # shown — it is an internal score, not a user-settable rating, and showing it confused the user.
     web_tag = "🌐 Web-Recherche" if result.get("used_web") else "💬 LLM"
-    footer = f"\n\n_{web_tag} · ⭐ {result.get('importance', 3)}/5"
+    footer = f"\n\n_{web_tag}"
     if note_path:
         try:
             footer += f" · 📄 `{note_path.relative_to(cfg.vault_root)}`"
@@ -477,6 +483,7 @@ async def _deliver_ask(result: dict, question: str, cfg: Config, msg, progress=N
     else:
         await _safe_reply(msg, out)
     shortterm_mod.add("echo", answer)
+    state_mod.set_key("last_answer", answer)  # so "schick nochmal / try again" can re-send it verbatim
     await _maybe_send_voice(answer, cfg, msg)
 
 
@@ -1056,6 +1063,15 @@ HELP_TEXT = """🧠 *Echo — was ich kann* (einfach normal sagen, keine Befehle
 """
 
 
+async def _resend_last(msg) -> None:
+    """Re-send Echo's last answer verbatim — no re-generation, so nothing (incl. any rating) changes."""
+    last = (state_mod.load().get("last_answer") or "").strip()
+    if not last:
+        await msg.reply_text("Ich habe noch keine letzte Antwort zum Nochmal-Schicken.")
+        return
+    await _safe_reply(msg, last)
+
+
 async def _do_prioritize(text: str, cfg: Config, msg) -> None:
     progress = await msg.reply_text("🎯 Priorisiere deine Tasks...")
     out = await asyncio.to_thread(intent_mod.rank_tasks, cfg, text)
@@ -1165,6 +1181,9 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
         if intent == "help":
             await msg.reply_text(HELP_TEXT, parse_mode="Markdown")
+            return
+        if intent == "resend":
+            await _resend_last(msg)
             return
         if intent in _ACTION_INTENTS:
             await _route_action(intent, text, update, ctx)

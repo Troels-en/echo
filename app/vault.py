@@ -62,6 +62,7 @@ STEP 1 — INTENT. Decide what the user wants:
 - "agenttask"  — wants Echo to EXECUTE a multi-step action on their knowledge/data using its tools (Notion + Obsidian vaults + files), NOT just note it. e.g. "zieh meine Notion-Habits in den Vault", "übertrag X aus Notion nach Y", "räum SecondBrain auf", "fass meine Finance-Notizen zu einer Seite zusammen", "sync …". Use this when the user asks Echo to DO/transfer/organize/consolidate something across Notion/vaults — not for code (devtask), not for a simple capture (note).
 - "prioritize"— wants their OPEN tasks ranked / what to do first / what matters in their day ("was soll ich zuerst machen", "priorisier meine Tasks", "was ist am wichtigsten", "was sind meine wichtigsten Sachen heute", "was steht heute an", "meine Prioritäten heute", "womit anfangen", "was ist dringend"). A question about the USER'S OWN day/tasks/what-to-do is "prioritize", NOT "ask" (ask is world/general knowledge only).
 - "help"      — wants to know what Echo can do ("was kannst du", "hilfe", "welche Befehle", "help", "was geht alles")
+- "resend"    — wants Echo to send its LAST answer/message AGAIN, unchanged ("schick das nochmal", "send it again", "nochmal die gleiche Nachricht", "try again", "gib mir das nochmal", "wiederhol das"). Use ONLY when they clearly mean repeat the previous reply, not ask a new question.
 - "note"     — capturing a new thought, idea, observation, or future task (default)
 
 STEP 2 — only if intent is "note", classify it into a vault AND extract ALL distinct tasks.
@@ -77,7 +78,7 @@ INPUT:
 
 Return ONLY a JSON object, no prose:
 {{
-  "intent": "query" | "complete" | "event" | "mail" | "news" | "ask" | "podcast" | "overview" | "stats" | "draft" | "finddoc" | "synthesize" | "mailme" | "status" | "devtask" | "prioritize" | "help" | "note",
+  "intent": "query" | "complete" | "event" | "mail" | "news" | "ask" | "podcast" | "overview" | "stats" | "draft" | "finddoc" | "synthesize" | "mailme" | "status" | "devtask" | "prioritize" | "help" | "resend" | "note",
   "dev_repo": "<if intent=devtask: the project/repo name the user named, else empty>",
   "dev_task": "<if intent=devtask: the concrete coding task in one clear sentence, else empty>",
   "agent_task": "<if intent=agenttask: the action to execute in one clear sentence, else empty>",
@@ -172,7 +173,7 @@ def classify(transcript: str, cfg: Config, history: str = "") -> dict:
     intent = result.get("intent", "note")
     if intent not in ("query", "complete", "note", "event", "mail", "news", "ask",
                       "podcast", "overview", "stats", "draft", "finddoc", "synthesize",
-                      "mailme", "status", "devtask", "agenttask", "prioritize", "help"):
+                      "mailme", "status", "devtask", "agenttask", "prioritize", "help", "resend"):
         intent = "note"
     result["intent"] = intent
 

@@ -1025,9 +1025,22 @@ async def _mirror_notion_bg(date: str, entry: str, msg) -> None:
 
 
 async def _maybe_answer_followup(classification: dict, cfg: Config, msg, history: str = "") -> None:
-    """Multi-intent: if the message also held a question on top of a capture/action, answer it."""
+    """Multi-intent: if the message also held a question on top of a capture/action, answer it.
+    Re-classify the embedded question so a 'what are my top 3 today' rides the same prioritize/query
+    routing as a standalone message — not always the general-knowledge 'ask' path."""
     q = (classification.get("also_question") or "").strip()
-    if q:
+    if not q:
+        return
+    try:
+        sub = await asyncio.to_thread(classify, q, cfg, history)
+        si = sub.get("intent", "ask")
+    except Exception:
+        si = "ask"
+    if si == "prioritize":
+        await _do_prioritize(q, cfg, msg)
+    elif si == "query":
+        await _answer_query(q, cfg, msg, history)
+    else:
         await _answer_ask(q, cfg, msg, history)
 
 

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import logging
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -24,9 +26,27 @@ from .transcribe import transcribe, TranscribeError
 from .vault import classify, write_note, write_answer_note, vault_todoist_config, find_related
 from .llm import LLMError
 from . import todoist as td
-from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod, tts as tts_mod, shortterm as shortterm_mod, secondbrain as secondbrain_mod, jobs as jobs_mod, proactive as proactive_mod, devtask as devtask_mod, notionsync as notionsync_mod, agenttask as agenttask_mod, transcript as transcript_mod, interactive as interactive_mod
+from . import store, rag, ask as ask_mod, intent as intent_mod, gcal, briefing as briefing_mod, state as state_mod, mailtriage, memory as memory_mod, news as news_mod, review as review_mod, agents as agents_mod, docsearch as docsearch_mod, podcast as podcast_mod, overview as overview_mod, events as events_mod, stats as stats_mod, tts as tts_mod, shortterm as shortterm_mod, secondbrain as secondbrain_mod, jobs as jobs_mod, proactive as proactive_mod, devtask as devtask_mod, notionsync as notionsync_mod, agenttask as agenttask_mod, transcript as transcript_mod, interactive as interactive_mod, vocab as vocab_mod
 
 log = logging.getLogger(__name__)
+
+_LOCK_FH = None  # kept open for the process lifetime so the flock is held
+
+
+def _acquire_single_instance_lock() -> None:
+    """Prevent two bots polling the same token (Telegram delivers each update to
+    only one getUpdates caller → flapping/dropped messages). Exit 0 if another
+    instance holds the lock, so launchd KeepAlive (SuccessfulExit=false) won't relaunch."""
+    global _LOCK_FH
+    fh = open("/tmp/echo-bot.lock", "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log.error("another Echo instance already running (lock held); exiting")
+        raise SystemExit(0)
+    fh.write(str(os.getpid()))
+    fh.flush()
+    _LOCK_FH = fh
 
 # whisper-server processes one transcription at a time → serialize voice notes.
 _transcribe_lock = asyncio.Lock()
@@ -319,6 +339,10 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if intent == "resend":
             await progress.delete()
             await _resend_last(msg)
+            return
+        if intent == "vocab":
+            await progress.delete()
+            await _handle_vocab(classification, msg)
             return
         if intent in _ACTION_INTENTS:
             await progress.delete()
@@ -1185,6 +1209,9 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if intent == "resend":
             await _resend_last(msg)
             return
+        if intent == "vocab":
+            await _handle_vocab(classification, msg)
+            return
         if intent in _ACTION_INTENTS:
             await _route_action(intent, text, update, ctx)
             return
@@ -1323,6 +1350,49 @@ async def cmd_prioritize(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     if not _is_allowed(update, cfg):
         return
     await _do_prioritize(" ".join(ctx.args) if ctx.args else "", cfg, update.message)
+
+
+async def cmd_vocab(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/vocab` zeigt gelernte Begriffe · `/vocab <Begriff[, Begriff2]>` bringt
+    Whisper die Schreibweise bei · `/vocab -<Begriff>` vergisst einen wieder."""
+    cfg: Config = ctx.application.bot_data["cfg"]
+    if not _is_allowed(update, cfg):
+        return
+    arg = " ".join(ctx.args).strip() if ctx.args else ""
+    if not arg:
+        terms = vocab_mod.all_terms()
+        if terms:
+            await update.message.reply_text("🗣 Whisper-Vokabular:\n" + "\n".join(f"· {t}" for t in terms))
+        else:
+            await update.message.reply_text("🗣 Noch keine Begriffe gelernt. Beispiel: `/vocab Mercanis`", parse_mode="Markdown")
+        return
+    if arg.startswith("-"):
+        term = arg[1:].strip()
+        ok = vocab_mod.remove(term)
+        await update.message.reply_text(f"🗑 {term} entfernt." if ok else f"{term} war nicht in der Liste.")
+        return
+    added = vocab_mod.add(arg)
+    if added:
+        await update.message.reply_text("✅ Gemerkt: " + ", ".join(added) + ". Whisper schreibt das ab jetzt so.")
+    else:
+        await update.message.reply_text("Schon bekannt, nichts hinzugefügt.")
+
+
+async def _handle_vocab(classification: dict, msg) -> None:
+    """Natural-language vocab: teach a spelling (vocab_term set) or list learned terms."""
+    term = (classification.get("vocab_term") or "").strip()
+    if term:
+        added = vocab_mod.add(term)
+        if added:
+            await msg.reply_text("✅ Gemerkt: " + ", ".join(added) + ". Whisper schreibt das ab jetzt so.")
+        else:
+            await msg.reply_text("Kenne ich schon, nichts Neues gelernt.")
+    else:
+        terms = vocab_mod.all_terms()
+        if terms:
+            await msg.reply_text("🗣 Diese Wörter habe ich gelernt:\n" + "\n".join(f"· {t}" for t in terms))
+        else:
+            await msg.reply_text("🗣 Ich habe noch keine speziellen Schreibweisen gelernt.")
 
 
 def _mail_scope_hint(e: Exception) -> str:
@@ -1999,6 +2069,8 @@ def main() -> None:
     # silence httpx URL leak (contains bot token)
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
+    _acquire_single_instance_lock()
+
     cfg = Config.load()
     log.info("loaded %d vaults: %s", len(cfg.vaults), list(cfg.vaults))
     log.info("default vault: %s", cfg.default_vault)
@@ -2016,10 +2088,12 @@ def main() -> None:
     # Ensure vector store schema exists before serving
     store.init_schema(cfg.data_dir / "store.db")
     events_mod.init_schema()
-    # Bridge: index the curated SecondBrain wiki into Echo's RAG (high-signal pages)
+    # Bridge: index NEW SecondBrain wiki pages into Echo's RAG. reindex=False so we
+    # don't reload the embed model + re-embed every page on each boot (that delayed
+    # polling ~10 min). Existing-page content refresh happens in the weekly synthesize_week().
     try:
-        n = secondbrain_mod.index_wiki(cfg, reindex=True)
-        log.info("indexed %d SecondBrain wiki pages into RAG", n)
+        n = secondbrain_mod.index_wiki(cfg, reindex=False)
+        log.info("indexed %d new SecondBrain wiki pages into RAG", n)
     except Exception as e:
         log.warning("SecondBrain wiki index at startup failed: %s", e)
 
@@ -2031,6 +2105,7 @@ def main() -> None:
     app.add_handler(CommandHandler("mail", cmd_mail))
     app.add_handler(CommandHandler("news", cmd_news))
     app.add_handler(CommandHandler("memory", cmd_memory))
+    app.add_handler(CommandHandler("vocab", cmd_vocab))
     app.add_handler(CommandHandler("forget", cmd_forget))
     app.add_handler(CommandHandler("editmemory", cmd_editmemory))
     app.add_handler(CommandHandler("mergememory", cmd_mergememory))

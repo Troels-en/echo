@@ -10,6 +10,8 @@ from pathlib import Path
 
 import httpx
 
+from . import vocab
+
 log = logging.getLogger(__name__)
 
 
@@ -30,6 +32,9 @@ def _via_server(audio_path: Path, language: str) -> str | None:
         with audio_path.open("rb") as f:
             files = {"file": (audio_path.name, f, "audio/wav")}
             data = {"response_format": "json", "language": language}
+            p = vocab.prompt()
+            if p:
+                data["prompt"] = p
             r = httpx.post(url, files=files, data=data, timeout=180.0)
         r.raise_for_status()
         try:
@@ -50,6 +55,9 @@ def _via_cli(audio_path: Path, model_path: Path, language: str) -> str:
         "whisper-cli", "-m", str(model_path), "-f", str(audio_path),
         "-l", language, "--no-prints", "-otxt",
     ]
+    p = vocab.prompt()
+    if p:
+        cmd += ["--prompt", p]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     if result.returncode != 0:
         raise TranscribeError(f"whisper-cli failed (exit {result.returncode}): {result.stderr[-500:]}")

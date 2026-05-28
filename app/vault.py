@@ -63,6 +63,7 @@ STEP 1 — INTENT. Decide what the user wants:
 - "prioritize"— wants their OPEN tasks ranked / what to do first / what matters in their day ("was soll ich zuerst machen", "priorisier meine Tasks", "was ist am wichtigsten", "was sind meine wichtigsten Sachen heute", "was steht heute an", "meine Prioritäten heute", "womit anfangen", "was ist dringend"). A question about the USER'S OWN day/tasks/what-to-do is "prioritize", NOT "ask" (ask is world/general knowledge only).
 - "help"      — wants to know what Echo can do ("was kannst du", "hilfe", "welche Befehle", "help", "was geht alles")
 - "resend"    — wants Echo to send its LAST answer/message AGAIN, unchanged ("schick das nochmal", "send it again", "nochmal die gleiche Nachricht", "try again", "gib mir das nochmal", "wiederhol das"). Use ONLY when they clearly mean repeat the previous reply, not ask a new question.
+- "vocab"    — wants Echo to LEARN THE SPELLING of a name/term so transcription gets it right ("merk dir die Schreibweise X", "das Wort schreibt man X", "der Name heißt X", "lern wie man X schreibt", "X wird so geschrieben"), OR asks which spellings/words it has already learned ("welche Wörter hast du gelernt", "welche Schreibweisen kennst du", "zeig mein Vokabular"). This is ONLY about how Whisper should spell a word, NOT a routing/labeling rule (those stay "note" + pattern fact). Put the term(s) to learn into "vocab_term"; leave "vocab_term" empty if they only ask for the list.
 - "note"     — capturing a new thought, idea, observation, or future task (default)
 
 STEP 2 — only if intent is "note", classify it into a vault AND extract ALL distinct tasks.
@@ -78,7 +79,8 @@ INPUT:
 
 Return ONLY a JSON object, no prose:
 {{
-  "intent": "query" | "complete" | "event" | "mail" | "news" | "ask" | "podcast" | "overview" | "stats" | "draft" | "finddoc" | "synthesize" | "mailme" | "status" | "devtask" | "prioritize" | "help" | "resend" | "note",
+  "intent": "query" | "complete" | "event" | "mail" | "news" | "ask" | "podcast" | "overview" | "stats" | "draft" | "finddoc" | "synthesize" | "mailme" | "status" | "devtask" | "prioritize" | "help" | "resend" | "vocab" | "note",
+  "vocab_term": "<if intent=vocab and teaching a spelling: the exact term(s) verbatim, comma-separated; empty if only asking for the list>",
   "dev_repo": "<if intent=devtask: the project/repo name the user named, else empty>",
   "dev_task": "<if intent=devtask: the concrete coding task in one clear sentence, else empty>",
   "agent_task": "<if intent=agenttask: the action to execute in one clear sentence, else empty>",

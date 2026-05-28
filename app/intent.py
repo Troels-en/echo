@@ -118,7 +118,7 @@ Return ONLY JSON:
   ],
   "note": "<one short overall hint, e.g. what to drop or batch; optional>"
 }}
-Rank at most the top 6. Be decisive."""
+COUNT: Wenn die Anfrage (siehe FOCUS) nach DER einen wichtigsten Aufgabe, was zuerst, oder nur EINER Sache fragt, gib GENAU 1 Item in "ranked" zurück. Fragt sie nach Prioritäten / was heute ansteht (Mehrzahl), gib die Top 3 bis 6. Be decisive. Schreibe die Felder "why" und "note" in der Sprache des Nutzers (Deutsch, wenn seine Aufgaben/Anfrage auf Deutsch sind, sonst Englisch)."""
 
 
 def _calendar_lines() -> list[str]:
@@ -169,6 +169,9 @@ def rank_tasks(cfg: Config, focus: str = "") -> str:
     ranked = r.get("ranked") or []
     if not ranked:
         return "Konnte nicht priorisieren."
+    if len(ranked) == 1:
+        item = ranked[0]
+        return f"🎯 *Zuerst:* {item.get('content','')[:70]}\n_{item.get('why','')[:90]}_"
     out = ["🎯 *Was zuerst:*"]
     for i, item in enumerate(ranked[:6], 1):
         out.append(f"{i}. *{item.get('content','')[:70]}*\n   _{item.get('why','')[:90]}_")
